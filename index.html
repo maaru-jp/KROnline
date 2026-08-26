@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>KR Online 記帳</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark">KR</span>
+          <div>
+            <strong>KR Online</strong>
+            <small>韓國網購記帳</small>
+          </div>
+        </div>
+        <nav class="nav" id="nav"></nav>
+        <p class="sidebar-note">試算表自動寫入會在畫面確認後接上。現在先用本機資料預覽流程。</p>
+      </aside>
+      <div class="main">
+        <header class="topbar">
+          <div>
+            <h1 id="page-title">總覽</h1>
+            <p class="muted" id="page-sub">Npay 餘額、本月實付、各卡未對帳</p>
+          </div>
+          <div class="topbar-actions" id="topbar-actions"></div>
+        </header>
+        <div id="banner"></div>
+        <section id="view" class="view"></section>
+      </div>
+    </div>
+    <script src="./app.js"></script>
+  </body>
+</html>
