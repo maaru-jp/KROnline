@@ -211,6 +211,13 @@ textarea {
   color: var(--green);
 }
 
+.stat .sub {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
 .panel {
   background: var(--card);
   border: 1px solid var(--line);

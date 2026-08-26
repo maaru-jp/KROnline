@@ -91,10 +91,10 @@ const SheetsSync = {
     return this.send({ action: "purchase", order, items });
   },
 
-  async pushTopup({ date, amount, card }) {
+  async pushTopup({ date, amount, card, fxRate, amountTwd }) {
     return this.send({
       action: "topup",
-      npay: { date, credit: amount, topUpCard: card },
+      npay: { date, credit: amount, topUpCard: card, fxRate, amountTwd },
     });
   },
 

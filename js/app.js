@@ -13,12 +13,12 @@ const NAV = [
 ];
 
 const SUB = {
-  dashboard: "Npay 餘額、本月實付、各卡未對帳",
-  "new-purchase": "商品、折扣、Npay 與刷哪張卡（富邦／中信）",
-  "npay-topup": "記錄何時買 Npay、用哪張卡、儲值後剩餘點數",
+  dashboard: "Npay 餘額、本月實付、各卡未對帳台幣",
+  "new-purchase": "先填商品，最後填台幣；填完會自動寫入試算表",
+  "npay-topup": "選卡並手動填台幣後，會自動寫入試算表",
   purchases: "點一筆訂單，看該筆完整商品明細；取消會補回 Npay 並記刷退",
   "npay-ledger": "儲值、扣除、取消訂單後的退款回補，每筆都留下剩餘點數",
-  cards: "原刷卡與取消後的刷退分開列，對到銀行帳單再勾已對帳",
+  cards: "原刷卡與刷退都記韓幣與手動填的台幣，對到銀行帳單再勾已對帳",
   sheets: "試算表目前的資料",
   sync: "試算表是唯一帳本；這裡只記住連線網址",
   "order-detail": "這一筆的全部商品、折扣、Npay 與刷卡；取消會補回點數並記刷退",
@@ -36,6 +36,33 @@ function esc(value) {
 
 function krw(n) {
   return `₩${Number(n || 0).toLocaleString("ko-KR")}`;
+}
+
+function twd(n) {
+  return `NT$${Number(n || 0).toLocaleString("zh-TW")}`;
+}
+
+function fxText(rate) {
+  const n = Number(rate || 0);
+  if (!n) return "—";
+  return String(Math.round(n * 1e6) / 1e6);
+}
+
+function roundRate(n) {
+  return Math.round(Number(n) * 1e6) / 1e6;
+}
+
+function derivedFxRate(krwAmt, twdAmt) {
+  const krwVal = Number(krwAmt || 0);
+  const twdVal = Number(twdAmt || 0);
+  if (!(krwVal > 0) || !(twdVal > 0)) return 0;
+  return roundRate(twdVal / krwVal);
+}
+
+function cardTwdForOrder(orderId) {
+  return ledger.cards
+    .filter((row) => row.relatedId === orderId && !isCardRefund(row.type))
+    .reduce((sum, row) => sum + Number(row.amountTwd || 0), 0);
 }
 
 function today() {
@@ -107,7 +134,7 @@ let formError = "";
 let formOk = "";
 
 const purchaseForm = blankPurchase();
-const topupForm = { date: today(), amount: "", card: "富邦" };
+const topupForm = { date: today(), amount: "", card: "富邦", amountTwd: "" };
 
 function blankPurchase() {
   return {
@@ -116,6 +143,7 @@ function blankPurchase() {
     discount: "0",
     npay: "0",
     cardAmount: "0",
+    cardTwd: "",
     card: "中信",
     note: "",
     items: [{ name: "", unitPrice: "", quantity: "1" }],
@@ -153,6 +181,9 @@ function render() {
 
 let lastErrorView = "";
 let lastOkView = "";
+let writeLock = false;
+let topupWriteTimer = 0;
+let purchaseWriteTimer = 0;
 
 function renderNav() {
   const active = view === "order-detail" ? "purchases" : view;
@@ -205,10 +236,10 @@ function renderDashboard(root) {
       <article class="stat accent"><div class="label">Npay 剩餘</div><div class="value">${krw(npayBalance())}</div></article>
       <article class="stat"><div class="label">${esc(now)} 實付</div><div class="value">${krw(monthPay)}</div></article>
       ${CARDS.map((name) => {
-        const open = ledger.cards
-          .filter((row) => row.card === name && !row.reconciled)
-          .reduce((sum, row) => sum + row.amount, 0);
-        return `<article class="stat"><div class="label">${esc(name)} 未對帳</div><div class="value">${krw(open)}</div></article>`;
+        const openRows = ledger.cards.filter((row) => row.card === name && !row.reconciled);
+        const openKrw = openRows.reduce((sum, row) => sum + row.amount, 0);
+        const openTwd = openRows.reduce((sum, row) => sum + Number(row.amountTwd || 0), 0);
+        return `<article class="stat"><div class="label">${esc(name)} 未對帳</div><div class="value">${twd(openTwd)}</div><div class="sub">${krw(openKrw)}</div></article>`;
       }).join("")}
     </div>
     <div class="grid-2">
@@ -257,7 +288,9 @@ function orderTable(orders, withAction) {
             ? "已取消"
             : [
                 row.npayUsed ? `Npay ${krw(row.npayUsed)}` : "",
-                row.cardAmount ? `${row.card || "刷卡"} ${krw(row.cardAmount)}` : "",
+                row.cardAmount
+                  ? `${row.card || "刷卡"} ${krw(row.cardAmount)}${cardTwdForOrder(row.id) ? `／${twd(cardTwdForOrder(row.id))}` : ""}`
+                  : "",
               ]
                 .filter(Boolean)
                 .join(" + ") || "—";
@@ -315,7 +348,7 @@ function renderPurchase(root) {
           <label class="field">使用 Npay
             <input type="number" min="0" id="p-npay" value="${esc(purchaseForm.npay)}" />
           </label>
-          <label class="field">刷卡金額
+          <label class="field">刷卡韓幣
             <input type="number" min="0" id="p-card-amt" value="${esc(purchaseForm.cardAmount)}" />
           </label>
           <label class="field">刷哪張卡
@@ -324,12 +357,15 @@ function renderPurchase(root) {
                 `<option ${purchaseForm.card === c ? "selected" : ""}>${esc(c)}</option>`,
             ).join("")}</select>
           </label>
+          <label class="field">台幣金額（手動填）
+            <input type="number" min="0" step="1" id="p-card-twd" value="${esc(purchaseForm.cardTwd)}" placeholder="帳單上的台幣" />
+          </label>
         </div>
-        <p class="muted">實付必須等於 Npay + 刷卡。刷卡大於 0 時必選富邦或中信，並寫入該卡對帳。</p>
+        <p class="muted">實付必須等於 Npay + 刷卡韓幣。請先填商品，最後手動填台幣；填完會自動寫入試算表（商品、刷卡、Npay 一併寫入）。</p>
         <p class="error" id="p-error">${formError ? esc(formError) : ""}</p>
         <p class="ok-msg" id="p-ok">${formOk ? esc(formOk) : ""}</p>
         <div class="item-actions">
-          <button class="btn btn-primary" type="button" id="save-purchase">寫入紀錄</button>
+          <button class="btn btn-primary" type="button" id="save-purchase">立即寫入試算表</button>
           ${lastSavedOrderId ? `<button class="btn" type="button" id="open-last">查看 ${esc(lastSavedOrderId)} 完整明細</button>` : ""}
         </div>
       </section>
@@ -357,6 +393,7 @@ function renderPurchase(root) {
     purchaseForm.cardAmount = String(Math.max(0, calcPayable() - Number(e.target.value || 0)));
     document.getElementById("p-card-amt").value = purchaseForm.cardAmount;
     paintPurchaseTotals();
+    maybeQueuePurchaseWrite();
   };
   document.getElementById("p-card-amt").oninput = (e) => {
     purchaseForm.cardAmount = e.target.value;
@@ -364,9 +401,23 @@ function renderPurchase(root) {
     purchaseForm.npay = String(Math.max(0, calcPayable() - Number(e.target.value || 0)));
     document.getElementById("p-npay").value = purchaseForm.npay;
     paintPurchaseTotals();
+    maybeQueuePurchaseWrite();
+  };
+  document.getElementById("p-card-twd").oninput = (e) => {
+    purchaseForm.cardTwd = e.target.value;
+    paintPurchaseTotals();
+    maybeQueuePurchaseWrite();
+  };
+  document.getElementById("p-card-twd").onblur = () => maybeQueuePurchaseWrite();
+  document.getElementById("p-card-twd").onkeydown = (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      savePurchase();
+    }
   };
   document.getElementById("p-card").onchange = (e) => {
     purchaseForm.card = e.target.value;
+    maybeQueuePurchaseWrite();
   };
   document.getElementById("add-item").onclick = () => {
     syncItemInputs();
@@ -404,6 +455,7 @@ function paintItemRows() {
       tbody.querySelector(`[data-total="${i}"]`).textContent = krw(total);
       syncPayInputs();
       paintPurchaseTotals();
+      maybeQueuePurchaseWrite();
     };
   });
   tbody.querySelectorAll("[data-del]").forEach((el) => {
@@ -440,6 +492,11 @@ function paintPurchaseTotals() {
     <div><span>店家折扣</span><span>− ${krw(discount)}</span></div>
     <div class="pay"><span>實付</span><span>${krw(payable)}</span></div>
     <div><span>Npay ${krw(npayAmt)} + ${esc(purchaseForm.card || "卡")} ${krw(cardAmt)}</span><span>${npayAmt + cardAmt === payable ? "相符" : "需等於實付"}</span></div>
+    ${
+      cardAmt > 0
+        ? `<div><span>刷卡台幣（手動）</span><span>${purchaseForm.cardTwd ? twd(Number(purchaseForm.cardTwd)) : "尚未填"}</span></div>`
+        : ""
+    }
     <div><span>目前 Npay 餘額</span><span>${krw(npayBalance())}</span></div>
     <div><span>送出後 Npay</span><span class="${remain < 0 ? "debit" : ""}">${remain < 0 ? "餘額不足" : krw(remain)}</span></div>
   `;
@@ -466,22 +523,31 @@ function applySplit(payable) {
 function syncPayInputs() {
   const npayEl = document.getElementById("p-npay");
   const cardEl = document.getElementById("p-card-amt");
+  const twdEl = document.getElementById("p-card-twd");
   if (npayEl) npayEl.value = purchaseForm.npay;
   if (cardEl) cardEl.value = purchaseForm.cardAmount;
+  if (twdEl) twdEl.value = purchaseForm.cardTwd;
 }
 
-async function savePurchase() {
+async function savePurchase(opts = {}) {
+  const auto = !!opts.auto;
+  if (writeLock) return;
+  if (auto && view !== "new-purchase") return;
   lastErrorView = "new-purchase";
   lastOkView = "new-purchase";
   formOk = "";
   syncItemInputs();
-  purchaseForm.date = document.getElementById("p-date").value;
-  purchaseForm.shop = document.getElementById("p-shop").value;
-  purchaseForm.discount = document.getElementById("p-discount").value;
-  purchaseForm.note = document.getElementById("p-note").value;
-  purchaseForm.npay = document.getElementById("p-npay").value;
-  purchaseForm.cardAmount = document.getElementById("p-card-amt").value;
-  purchaseForm.card = document.getElementById("p-card").value;
+  const dateEl = document.getElementById("p-date");
+  if (dateEl) {
+    purchaseForm.date = dateEl.value;
+    purchaseForm.shop = document.getElementById("p-shop").value;
+    purchaseForm.discount = document.getElementById("p-discount").value;
+    purchaseForm.note = document.getElementById("p-note").value;
+    purchaseForm.npay = document.getElementById("p-npay").value;
+    purchaseForm.cardAmount = document.getElementById("p-card-amt").value;
+    purchaseForm.card = document.getElementById("p-card").value;
+    purchaseForm.cardTwd = document.getElementById("p-card-twd").value;
+  }
   const items = purchaseForm.items
     .map((row) => ({
       name: row.name.trim(),
@@ -490,28 +556,34 @@ async function savePurchase() {
     }))
     .filter((row) => row.name || row.unitPrice || row.quantity !== 1);
 
-  if (!purchaseForm.date) return fail("請填購買日期");
-  if (!purchaseForm.shop.trim()) return fail("請填店家");
-  if (!items.length) return fail("請至少登一件商品");
+  const skip = (message) => (auto ? undefined : fail(message));
+  if (!purchaseForm.date) return skip("請填購買日期");
+  if (!purchaseForm.shop.trim()) return skip("請填店家");
+  if (!items.length) return skip("請至少登一件商品");
   for (const row of items) {
-    if (!row.name) return fail("商品名稱為必填");
-    if (!(row.unitPrice > 0)) return fail("單價必須大於 0");
+    if (!row.name) return skip("商品名稱為必填");
+    if (!(row.unitPrice > 0)) return skip("單價必須大於 0");
     if (!Number.isInteger(row.quantity) || row.quantity < 1)
-      return fail("數量必須是正整數");
+      return skip("數量必須是正整數");
   }
   const goods = items.reduce((sum, row) => sum + row.unitPrice * row.quantity, 0);
   const discount = Number(purchaseForm.discount || 0);
-  if (discount < 0 || discount > goods) return fail("店家折扣需介於 0 與商品合計之間");
+  if (discount < 0 || discount > goods) return skip("店家折扣需介於 0 與商品合計之間");
   const payable = goods - discount;
   const npayUsed = Number(purchaseForm.npay || 0);
   const cardAmount = Number(purchaseForm.cardAmount || 0);
   if (npayUsed + cardAmount !== payable)
-    return fail(`實付 ${krw(payable)} 必須等於 Npay + 刷卡`);
+    return skip(`實付 ${krw(payable)} 必須等於 Npay + 刷卡`);
   if (npayUsed > npayBalance())
     return fail(`Npay 餘額不足，目前 ${krw(npayBalance())}`);
-  if (cardAmount > 0 && !purchaseForm.card) return fail("刷卡時請選擇富邦或中信");
+  if (cardAmount > 0 && !purchaseForm.card) return skip("刷卡時請選擇富邦或中信");
+  const cardTwdAmt = Number(purchaseForm.cardTwd || 0);
+  if (cardAmount > 0 && !(cardTwdAmt > 0)) return skip("刷卡請手動填台幣金額");
+  if (auto && !(cardAmount > 0 && cardTwdAmt > 0)) return;
+  const fxRate = cardAmount > 0 ? derivedFxRate(cardAmount, cardTwdAmt) : 0;
   if (!SheetsSync.configured()) return fail("請先到「同步試算表」接上試算表網址");
 
+  writeLock = true;
   const beforeCount = ledger.orders.length;
   formError = "";
   formOk = "正在寫入 Google 試算表…";
@@ -524,11 +596,14 @@ async function savePurchase() {
       npayUsed,
       cardAmount,
       card: cardAmount > 0 ? purchaseForm.card : "",
+      fxRate: cardAmount > 0 ? fxRate : 0,
+      cardTwd: cardAmount > 0 ? cardTwdAmt : 0,
       note: purchaseForm.note.trim(),
     },
     items,
   });
   const loaded = await refreshFromSheets();
+  writeLock = false;
   if (!result.ok && !result.opaque) return fail(SheetsSync.label(result));
   if (!loaded.ok) return fail(loaded.error || "已送出，但無法從試算表讀回");
   if (result.opaque && ledger.orders.length <= beforeCount) {
@@ -537,15 +612,32 @@ async function savePurchase() {
   Object.assign(purchaseForm, blankPurchase());
   lastSavedOrderId = result.orderId || ledger.orders[ledger.orders.length - 1]?.id || "";
   formError = "";
-  formOk = `已寫入試算表${lastSavedOrderId ? " " + lastSavedOrderId : ""}，實付 ${krw(payable)}。Npay 剩餘 ${krw(npayBalance())}。`;
+  formOk = `已寫入試算表${lastSavedOrderId ? " " + lastSavedOrderId : ""}，實付 ${krw(payable)}${cardAmount > 0 ? `，刷卡 ${krw(cardAmount)}／${twd(cardTwdAmt)}` : ""}。Npay 剩餘 ${krw(npayBalance())}。`;
   lastOkView = "new-purchase";
   render();
 }
 
 function fail(message) {
+  writeLock = false;
   formError = message;
   formOk = "";
   render();
+}
+
+function maybeQueuePurchaseWrite() {
+  const cardAmt = Number(purchaseForm.cardAmount || 0);
+  const twdAmt = Number(purchaseForm.cardTwd || 0);
+  if (!(cardAmt > 0) || !(twdAmt > 0)) return;
+  clearTimeout(purchaseWriteTimer);
+  purchaseWriteTimer = setTimeout(() => savePurchase({ auto: true }), 900);
+}
+
+function maybeQueueTopupWrite() {
+  if (!topupForm.date || !(Number(topupForm.amount) > 0) || !topupForm.card || !(Number(topupForm.amountTwd) > 0)) {
+    return;
+  }
+  clearTimeout(topupWriteTimer);
+  topupWriteTimer = setTimeout(() => saveTopup({ auto: true }), 900);
 }
 
 function renderTopup(root) {
@@ -556,7 +648,7 @@ function renderTopup(root) {
         <label class="field">日期
           <input type="date" id="t-date" value="${esc(topupForm.date)}" />
         </label>
-        <label class="field">儲值金額 KRW
+        <label class="field">儲值韓幣
           <input type="number" min="1" id="t-amt" value="${esc(topupForm.amount)}" />
         </label>
         <label class="field">儲值用銀行卡
@@ -564,29 +656,67 @@ function renderTopup(root) {
             (c) => `<option ${topupForm.card === c ? "selected" : ""}>${esc(c)}</option>`,
           ).join("")}</select>
         </label>
+        <label class="field">台幣金額（手動填）
+          <input type="number" min="0" step="1" id="t-twd" value="${esc(topupForm.amountTwd)}" placeholder="帳單上的台幣" />
+        </label>
       </div>
-      <p class="muted">會同時寫入 Npay 歷程（剩餘點數）與該卡明細，方便對銀行帳單。</p>
-      <p>儲值前餘額 <strong>${krw(npayBalance())}</strong></p>
+      <p class="muted">選卡並手動填台幣後會自動寫入試算表（Npay 歷程 + 該卡明細）。也可按下方按鈕立即寫入。</p>
+      <p>儲值前餘額 <strong>${krw(npayBalance())}</strong>${Number(topupForm.amount) > 0 && Number(topupForm.amountTwd) > 0 ? `　刷卡 ${krw(topupForm.amount)}／${twd(topupForm.amountTwd)}` : ""}</p>
       ${formError && view === "npay-topup" ? `<p class="error">${esc(formError)}</p>` : ""}
       ${formOk && view === "npay-topup" ? `<p class="ok-msg">${esc(formOk)}</p>` : ""}
       <div class="item-actions">
-        <button class="btn btn-primary" type="button" id="save-topup">寫入儲值</button>
+        <button class="btn btn-primary" type="button" id="save-topup">立即寫入試算表</button>
       </div>
     </section>
   `;
-  document.getElementById("t-date").oninput = (e) => (topupForm.date = e.target.value);
-  document.getElementById("t-amt").oninput = (e) => (topupForm.amount = e.target.value);
-  document.getElementById("t-card").onchange = (e) => (topupForm.card = e.target.value);
-  document.getElementById("save-topup").onclick = saveTopup;
+  document.getElementById("t-date").oninput = (e) => {
+    topupForm.date = e.target.value;
+    maybeQueueTopupWrite();
+  };
+  document.getElementById("t-amt").oninput = (e) => {
+    topupForm.amount = e.target.value;
+    maybeQueueTopupWrite();
+  };
+  document.getElementById("t-twd").oninput = (e) => {
+    topupForm.amountTwd = e.target.value;
+    maybeQueueTopupWrite();
+  };
+  document.getElementById("t-twd").onblur = () => maybeQueueTopupWrite();
+  document.getElementById("t-twd").onkeydown = (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      saveTopup();
+    }
+  };
+  document.getElementById("t-card").onchange = (e) => {
+    topupForm.card = e.target.value;
+    maybeQueueTopupWrite();
+  };
+  document.getElementById("save-topup").onclick = () => saveTopup();
 }
 
-async function saveTopup() {
+async function saveTopup(opts = {}) {
+  const auto = !!opts.auto;
+  if (writeLock) return;
+  if (auto && view !== "npay-topup") return;
   lastErrorView = "npay-topup";
   lastOkView = "npay-topup";
+  const dateEl = document.getElementById("t-date");
+  if (dateEl) {
+    topupForm.date = dateEl.value;
+    topupForm.amount = document.getElementById("t-amt").value;
+    topupForm.card = document.getElementById("t-card").value;
+    topupForm.amountTwd = document.getElementById("t-twd").value;
+  }
   const amount = Number(topupForm.amount);
-  if (!topupForm.date) return fail("請填日期");
-  if (!(amount > 0)) return fail("儲值金額必須大於 0");
+  const amountTwd = Number(topupForm.amountTwd || 0);
+  const skip = (message) => (auto ? undefined : fail(message));
+  if (!topupForm.date) return skip("請填日期");
+  if (!(amount > 0)) return skip("儲值金額必須大於 0");
+  if (!(amountTwd > 0)) return skip("請手動填台幣金額");
+  const fxRate = derivedFxRate(amount, amountTwd);
   if (!SheetsSync.configured()) return fail("請先到「同步試算表」接上試算表網址");
+  writeLock = true;
   const before = ledger.npay.length;
   formError = "";
   formOk = "正在寫入 Google 試算表…";
@@ -595,15 +725,19 @@ async function saveTopup() {
     date: topupForm.date,
     amount,
     card: topupForm.card,
+    fxRate,
+    amountTwd,
   });
   const loaded = await refreshFromSheets();
+  writeLock = false;
   if (!result.ok && !result.opaque) return fail(SheetsSync.label(result));
   if (!loaded.ok) return fail(loaded.error || "已送出，但無法從試算表讀回");
   if (result.opaque && ledger.npay.length <= before) {
     return fail("試算表沒有新增列。請確認已部署為「任何人」，且程式已部署新版本。");
   }
   topupForm.amount = "";
-  formOk = `已寫入試算表，儲值 ${krw(amount)}，Npay 剩餘 ${krw(npayBalance())}，記入 ${topupForm.card}。`;
+  topupForm.amountTwd = "";
+  formOk = `已寫入試算表，儲值 ${krw(amount)}／${twd(amountTwd)}，Npay 剩餘 ${krw(npayBalance())}，記入 ${topupForm.card}。`;
   render();
 }
 
@@ -693,7 +827,7 @@ function renderOrderDetail(root) {
           <div><span>店家折扣</span><span>− ${krw(row.storeDiscount)}</span></div>
           <div class="pay"><span>實付</span><span>${krw(payable)}</span></div>
           <div><span>Npay</span><span>${krw(row.npayUsed)}</span></div>
-          <div><span>${esc(row.card || "刷卡")}</span><span>${krw(row.cardAmount)}</span></div>
+          <div><span>${esc(row.card || "刷卡")}</span><span>${krw(row.cardAmount)}${cardTwdForOrder(row.id) ? `／${twd(cardTwdForOrder(row.id))}` : ""}</span></div>
         </div>
         ${
           npayRows.length
@@ -718,7 +852,7 @@ function renderOrderDetail(root) {
           cardRows.length
             ? `<h2 style="margin-top:18px">銀行卡</h2>
           <div class="table-wrap"><table>
-            <thead><tr><th>日期</th><th>卡</th><th>類型</th><th class="num">金額</th><th>對帳</th></tr></thead>
+            <thead><tr><th>日期</th><th>卡</th><th>類型</th><th class="num">韓幣</th><th class="num">匯率</th><th class="num">台幣</th><th>對帳</th></tr></thead>
             <tbody>${cardRows
               .map(
                 (entry) => `<tr>
@@ -726,6 +860,8 @@ function renderOrderDetail(root) {
               <td>${esc(entry.card)}</td>
               <td>${esc(entry.type)}</td>
               <td class="num ${entry.amount < 0 ? "credit" : ""}">${krw(entry.amount)}</td>
+              <td class="num">${fxText(entry.fxRate)}</td>
+              <td class="num ${entry.amountTwd < 0 ? "credit" : ""}">${entry.amountTwd ? twd(entry.amountTwd) : "—"}</td>
               <td>${entry.reconciled ? "已對帳" : "未對帳"}</td>
             </tr>`,
               )
@@ -748,7 +884,7 @@ function renderOrderDetail(root) {
         lines.push(`Npay 將補回 ${krw(row.npayUsed)}。舊的「消費扣除」列會保留，另外新增「退款回補」。`);
       }
       if (row.cardAmount) {
-        lines.push(`${row.card || "信用卡"} 將新增一筆刷退 ${krw(row.cardAmount)}，方便對銀行帳單。原刷卡列會保留。`);
+        lines.push(`${row.card || "信用卡"} 將新增一筆刷退 ${krw(row.cardAmount)}${cardTwdForOrder(row.id) ? `／${twd(cardTwdForOrder(row.id))}` : ""}，方便對銀行帳單。原刷卡列會保留。`);
       }
       if (!row.npayUsed && !row.cardAmount) {
         lines.push("這筆沒有扣 Npay 也沒有刷卡。");
@@ -788,10 +924,17 @@ function renderOrderDetail(root) {
         ledger.cards
           .filter((entry) => entry.relatedId === row.id && isCardRefund(entry.type))
           .reduce((sum, entry) => sum + Math.abs(entry.amount || 0), 0);
+      const cardRefundTwd =
+        Number(result.cardRefundedTwd) ||
+        ledger.cards
+          .filter((entry) => entry.relatedId === row.id && isCardRefund(entry.type))
+          .reduce((sum, entry) => sum + Math.abs(entry.amountTwd || 0), 0);
       const parts = [`已取消 ${row.id}`];
       if (restored) parts.push(`Npay 補回 ${krw(restored)}，目前剩餘 ${krw(npayBalance())}`);
       if (cardRefunded) {
-        parts.push(`${result.card || row.card || "信用卡"} 已記刷退 ${krw(cardRefunded)}`);
+        parts.push(
+          `${result.card || row.card || "信用卡"} 已記刷退 ${krw(cardRefunded)}${cardRefundTwd ? `／${twd(cardRefundTwd)}` : ""}`,
+        );
       }
       notice = `${parts[0]}${parts.length > 1 ? "，" + parts.slice(1).join("；") : ""}。`;
       render();
@@ -831,8 +974,10 @@ function renderNpay(root) {
 function renderCards(root) {
   const rows = ledger.cards.filter((row) => row.card === cardTab);
   const openRows = rows.filter((row) => !row.reconciled);
-  const open = openRows.reduce((sum, row) => sum + row.amount, 0);
-  const all = rows.reduce((sum, row) => sum + row.amount, 0);
+  const openKrw = openRows.reduce((sum, row) => sum + row.amount, 0);
+  const openTwd = openRows.reduce((sum, row) => sum + Number(row.amountTwd || 0), 0);
+  const allKrw = rows.reduce((sum, row) => sum + row.amount, 0);
+  const allTwd = rows.reduce((sum, row) => sum + Number(row.amountTwd || 0), 0);
   root.innerHTML = `
     <div class="tabs">
       ${CARDS.map(
@@ -841,15 +986,16 @@ function renderCards(root) {
       ).join("")}
     </div>
     <div class="stats">
-      <article class="stat"><div class="label">${esc(cardTab)} 合計</div><div class="value">${krw(all)}</div></article>
-      <article class="stat"><div class="label">未對帳淨額</div><div class="value">${krw(open)}</div></article>
+      <article class="stat"><div class="label">${esc(cardTab)} 合計韓幣</div><div class="value">${krw(allKrw)}</div></article>
+      <article class="stat"><div class="label">${esc(cardTab)} 合計台幣</div><div class="value">${twd(allTwd)}</div></article>
+      <article class="stat"><div class="label">未對帳台幣</div><div class="value">${twd(openTwd)}</div><div class="sub">${krw(openKrw)}</div></article>
       <article class="stat"><div class="label">未對帳筆數</div><div class="value">${openRows.length}</div></article>
     </div>
     <section class="panel">
       ${
         rows.length
           ? `<div class="table-wrap"><table>
-        <thead><tr><th>單號</th><th>日期</th><th>類型</th><th class="num">金額</th><th>關聯</th><th>對帳</th></tr></thead>
+        <thead><tr><th>單號</th><th>日期</th><th>類型</th><th class="num">韓幣</th><th class="num">匯率</th><th class="num">台幣</th><th>關聯</th><th>對帳</th></tr></thead>
         <tbody>
           ${rows
             .slice()
@@ -860,6 +1006,8 @@ function renderCards(root) {
             <td>${esc(row.date)}</td>
             <td>${esc(row.type)}</td>
             <td class="num ${row.amount < 0 ? "credit" : ""}">${krw(row.amount)}</td>
+            <td class="num">${fxText(row.fxRate)}</td>
+            <td class="num ${row.amountTwd < 0 ? "credit" : ""}">${row.amountTwd ? twd(row.amountTwd) : "—"}</td>
             <td>${isOrderId(row.relatedId) ? orderLink(row.relatedId) : esc(row.relatedId || "—")}</td>
             <td><button class="btn ${row.reconciled ? "" : "btn-primary"}" data-toggle="${esc(row.id)}" type="button">${row.reconciled ? "已對帳" : "未對帳"}</button></td>
           </tr>`,
@@ -999,17 +1147,19 @@ function sheetNpay() {
 
 function sheetCards() {
   return simpleTable(
-    ["單號", "日期", "銀行卡", "類型", "金額 KRW", "關聯", "對帳"],
+    ["單號", "日期", "銀行卡", "類型", "韓幣", "匯率", "台幣", "關聯", "對帳"],
     ledger.cards.map((row) => [
       row.id,
       row.date,
       row.card,
       row.type,
       krw(row.amount),
+      fxText(row.fxRate),
+      row.amountTwd ? twd(row.amountTwd) : "—",
       row.relatedId,
       row.reconciled ? "已對帳" : "未對帳",
     ]),
-    [4],
+    [4, 5, 6],
   );
 }
 
@@ -1022,7 +1172,7 @@ function renderSync(root) {
       <section class="panel">
         <h2>部署步驟（做一次即可）</h2>
         <ol class="steps">
-          <li>開一份 Google 試算表，建立五個工作表：<strong>商品明細、購買訂單、Npay歷程、銀行卡明細、設定</strong>，第一列貼上對應表頭。</li>
+          <li>開一份 Google 試算表，建立五個工作表：<strong>商品明細、購買訂單、Npay歷程、銀行卡明細、設定</strong>，第一列貼上對應表頭。銀行卡明細需有「匯率、金額TWD」兩欄；若沒有，部署新版後會自動補上。</li>
           <li>試算表選單：<strong>擴充功能 → Apps Script</strong>。</li>
           <li>刪掉預設內容，貼上專案裡 <code>apps-script/Code.gs</code> 的全部程式，按儲存。</li>
           <li>在編輯器選 <code>doGet</code>，按「執行」，允許存取這份試算表。</li>

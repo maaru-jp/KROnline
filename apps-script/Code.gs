@@ -20,7 +20,7 @@ var HEADERS = {
   商品明細: ["明細號", "訂單號", "購買日", "店家", "商品名稱", "單價KRW", "數量", "總金額KRW", "寫入時間"],
   購買訂單: ["訂單號", "購買日", "店家", "商品合計KRW", "店家折扣KRW", "實付KRW", "Npay", "刷卡KRW", "銀行卡", "備註", "寫入時間", "狀態"],
   Npay歷程: ["單號", "日期", "類型", "儲值KRW", "扣除KRW", "剩餘點數", "儲值銀行卡", "關聯訂單", "寫入時間"],
-  銀行卡明細: ["單號", "日期", "銀行卡", "類型", "金額KRW", "關聯", "對帳", "寫入時間"],
+  銀行卡明細: ["單號", "日期", "銀行卡", "類型", "金額KRW", "關聯", "對帳", "寫入時間", "匯率", "金額TWD"],
   設定: ["類型", "名稱", "備註"],
 };
 
@@ -145,6 +145,8 @@ function loadCards_() {
       amount: num_(r[4]),
       relatedId: str_(r[5]),
       reconciled: str_(r[6]) === "已對帳",
+      fxRate: num_(r[8]),
+      amountTwd: num_(r[9]),
     };
   });
 }
@@ -178,6 +180,10 @@ function writePurchase_(data) {
       throw new Error("實付必須等於 Npay + 刷卡");
     }
     if (cardAmount > 0 && !order.card) throw new Error("刷卡時請選擇銀行卡");
+    var cardFx = cardFx_(cardAmount, order.fxRate, order.cardTwd);
+    if (cardAmount > 0 && !(Math.abs(cardFx.twd) > 0)) {
+      throw new Error("刷卡請手動填台幣金額");
+    }
 
     var balance = npayBalance_();
     if (npayUsed > balance) {
@@ -241,16 +247,17 @@ function writePurchase_(data) {
     var cardId = "";
     if (cardAmount > 0) {
       cardId = nextId_(SHEETS.cards, "C");
-      sheet_(SHEETS.cards).appendRow([
-        cardId,
-        order.date,
-        order.card,
-        npayUsed > 0 ? "購物補差額" : "直接刷卡",
-        cardAmount,
-        orderId,
-        "未對帳",
-        now,
-      ]);
+      appendCard_({
+        id: cardId,
+        date: order.date,
+        card: order.card,
+        type: npayUsed > 0 ? "購物補差額" : "直接刷卡",
+        amount: cardAmount,
+        related: orderId,
+        now: now,
+        rate: cardFx.rate,
+        twd: cardFx.twd,
+      });
     }
 
     return json_({
@@ -277,6 +284,10 @@ function writeTopup_(data) {
     if (!n.date || !(amount > 0) || !cardName) {
       throw new Error("儲值資料不完整");
     }
+    var topupFx = cardFx_(amount, n.fxRate, n.amountTwd || n.cardTwd);
+    if (!(Math.abs(topupFx.twd) > 0)) {
+      throw new Error("儲值刷卡請手動填台幣金額");
+    }
     var now = now_();
     var npayId = nextId_(SHEETS.npay, "N");
     var balance = npayBalance_() + amount;
@@ -292,16 +303,17 @@ function writeTopup_(data) {
       now,
     ]);
     var cardId = nextId_(SHEETS.cards, "C");
-    sheet_(SHEETS.cards).appendRow([
-      cardId,
-      n.date,
-      cardName,
-      "Npay儲值",
-      amount,
-      npayId,
-      "未對帳",
-      now,
-    ]);
+    appendCard_({
+      id: cardId,
+      date: n.date,
+      card: cardName,
+      type: "Npay儲值",
+      amount: amount,
+      related: npayId,
+      now: now,
+      rate: topupFx.rate,
+      twd: topupFx.twd,
+    });
     return json_({
       ok: true,
       action: "topup",
@@ -333,7 +345,8 @@ function reconcile_(data) {
     }
     if (!found) throw new Error("找不到 " + id);
     var next = data.reconciled ? "已對帳" : "未對帳";
-    sh.getRange(found, 7).setValue(next);
+    var reconCol = headerCol_(sh, "對帳") || 7;
+    sh.getRange(found, reconCol).setValue(next);
     return json_({ ok: true, action: "reconcile", id: id, reconciled: !!data.reconciled });
   } finally {
     lock.releaseLock();
@@ -394,17 +407,19 @@ function cancelOrder_(data) {
       if (!refundCard) {
         throw new Error("這筆有刷卡金額但找不到銀行卡，無法記刷退");
       }
+      var refundFx = cardFx_(refundAmount, charge.rate, charge.twd);
       cardRefundId = nextId_(SHEETS.cards, "C");
-      sheet_(SHEETS.cards).appendRow([
-        cardRefundId,
-        cancelDate,
-        refundCard,
-        "刷退",
-        -refundAmount,
-        orderId,
-        "未對帳",
-        now,
-      ]);
+      appendCard_({
+        id: cardRefundId,
+        date: cancelDate,
+        card: refundCard,
+        type: "刷退",
+        amount: -refundAmount,
+        related: orderId,
+        now: now,
+        rate: refundFx.rate,
+        twd: -Math.abs(refundFx.twd),
+      });
     }
     sh.getRange(row, statusCol).setValue("已取消");
     return json_({
@@ -414,6 +429,7 @@ function cancelOrder_(data) {
       npayRestored: restored,
       npayBalance: balance,
       cardRefunded: refundAmount > 0 ? refundAmount : 0,
+      cardRefundedTwd: refundAmount > 0 ? Math.abs(refundFx && refundFx.twd ? refundFx.twd : 0) : 0,
       card: refundCard || "",
       cardId: cardRefundId,
     });
@@ -430,6 +446,8 @@ function findOrderCardCharge_(orderId) {
   var rows = rows_(SHEETS.cards);
   var amount = 0;
   var card = "";
+  var rate = 0;
+  var twd = 0;
   for (var i = 0; i < rows.length; i++) {
     if (str_(rows[i][5]) !== orderId) continue;
     var type = str_(rows[i][3]);
@@ -437,10 +455,40 @@ function findOrderCardCharge_(orderId) {
     var amt = num_(rows[i][4]);
     if (amt > 0) {
       amount += amt;
+      twd += num_(rows[i][9]);
       if (!card) card = str_(rows[i][2]);
+      if (!rate) rate = num_(rows[i][8]);
     }
   }
-  return { amount: amount, card: card };
+  return { amount: amount, card: card, rate: rate, twd: twd };
+}
+
+function cardFx_(krwAmt, rate, twd) {
+  krwAmt = Number(krwAmt || 0);
+  rate = Number(rate || 0);
+  twd = Number(twd || 0);
+  var absKrw = Math.abs(krwAmt);
+  var absTwd = Math.abs(twd);
+  if (!(absKrw > 0)) return { rate: 0, twd: 0 };
+  if (!(absTwd > 0) && rate > 0) absTwd = Math.round(absKrw * rate);
+  if (!(rate > 0) && absTwd > 0) rate = absTwd / absKrw;
+  return { rate: rate, twd: krwAmt < 0 ? -absTwd : absTwd };
+}
+
+function appendCard_(row) {
+  ensureSheetHeaders_(SHEETS.cards);
+  sheet_(SHEETS.cards).appendRow([
+    row.id,
+    row.date,
+    row.card,
+    row.type,
+    row.amount,
+    row.related || "",
+    row.reconciled || "未對帳",
+    row.now,
+    row.rate || 0,
+    row.twd || 0,
+  ]);
 }
 
 function headerCol_(sh, name) {
@@ -501,11 +549,28 @@ function rows_(name) {
   return sh.getRange(2, 1, last - 1, cols).getValues();
 }
 
+function ensureSheetHeaders_(name) {
+  var sh = sheet_(name);
+  var wanted = HEADERS[name];
+  if (!wanted) return;
+  var lastCol = Math.max(sh.getLastColumn(), 1);
+  var have = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(str_);
+  wanted.forEach(function (h) {
+    if (have.indexOf(h) === -1) {
+      var col = Math.max(sh.getLastColumn() + 1, 1);
+      sh.getRange(1, col).setValue(h);
+      sh.getRange(1, col).setFontWeight("bold");
+      have.push(h);
+    }
+  });
+}
+
 function ensure_() {
   Object.keys(HEADERS).forEach(function (name) {
     sheet_(name);
   });
   ensureOrderStatusCol_();
+  ensureSheetHeaders_(SHEETS.cards);
   var settings = sheet_(SHEETS.settings);
   if (settings.getLastRow() < 2) {
     [
