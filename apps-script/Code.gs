@@ -59,16 +59,9 @@ function handle_(data) {
   try {
     checkSecret_(data.secret);
     var action = data.action || "ping";
-    if (action === "ping") {
-      var ss = SpreadsheetApp.getActiveSpreadsheet();
-      return json_({
-        ok: true,
-        action: "ping",
-        spreadsheet: ss.getName(),
-        url: ss.getUrl(),
-      });
-    }
+    if (action === "ping") return ping_();
     if (action === "load") return loadAll_();
+    if (action === "selftest") return selftest_();
     if (action === "purchase") return writePurchase_(data);
     if (action === "topup") return writeTopup_(data);
     if (action === "reconcile") return reconcile_(data);
@@ -87,11 +80,50 @@ function checkSecret_(given) {
   }
 }
 
+function ping_() {
+  ensure_();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheets = ss.getSheets().map(function (sh) {
+    return {
+      name: sh.getName(),
+      rows: Math.max(0, sh.getLastRow() - 1),
+    };
+  });
+  return json_({
+    ok: true,
+    action: "ping",
+    version: "write-v2",
+    spreadsheet: ss.getName(),
+    url: ss.getUrl(),
+    sheets: sheets,
+  });
+}
+
+function selftest_() {
+  ensure_();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var now = now_();
+  sheet_(SHEETS.settings).appendRow(["連線測試", now, "網頁寫入成功"]);
+  return json_({
+    ok: true,
+    action: "selftest",
+    version: "write-v2",
+    spreadsheet: ss.getName(),
+    url: ss.getUrl(),
+    wrote: "設定",
+    at: now,
+  });
+}
+
 function loadAll_() {
   ensure_();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
   return json_({
     ok: true,
     action: "load",
+    version: "write-v2",
+    spreadsheet: ss.getName(),
+    url: ss.getUrl(),
     items: loadItems_(),
     orders: loadOrders_(),
     npay: loadNpay_(),

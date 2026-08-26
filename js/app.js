@@ -184,6 +184,7 @@ let lastOkView = "";
 let writeLock = false;
 let topupWriteTimer = 0;
 let purchaseWriteTimer = 0;
+let sheetInfo = null;
 
 function renderNav() {
   const active = view === "order-detail" ? "purchases" : view;
@@ -205,6 +206,31 @@ function renderNav() {
       render();
     };
   });
+}
+
+function rememberSheetInfo(result) {
+  if (!result) return;
+  if (result.spreadsheet || result.url || result.sheets || result.version) {
+    sheetInfo = {
+      spreadsheet: result.spreadsheet || sheetInfo?.spreadsheet || "",
+      url: result.url || sheetInfo?.url || "",
+      version: result.version || sheetInfo?.version || "",
+      sheets: result.sheets || sheetInfo?.sheets || [],
+    };
+  }
+}
+
+function sheetInfoHtml() {
+  if (!sheetInfo?.spreadsheet) return "";
+  const old = sheetInfo.version !== "write-v2";
+  const counts = (sheetInfo.sheets || [])
+    .map((row) => `${esc(row.name)} ${row.rows} 列`)
+    .join("、");
+  return `<p class="muted">目前連到：<strong>${esc(sheetInfo.spreadsheet)}</strong>${
+    sheetInfo.url ? `　<a href="${esc(sheetInfo.url)}" target="_blank" rel="noopener">打開試算表</a>` : ""
+  }${counts ? `<br>分頁：${counts}` : ""}${
+    old ? `<br>這還是舊版程式，登記寫不進去。請把最新 Code.gs 貼上後，部署「新版本」。` : ""
+  }</p>`;
 }
 
 function renderBanner() {
@@ -232,6 +258,7 @@ function renderDashboard(root) {
     .filter((row) => monthKey(row.date) === now && row.status !== "已取消")
     .reduce((sum, row) => sum + row.npayUsed + row.cardAmount, 0);
   root.innerHTML = `
+    ${sheetInfoHtml()}
     <div class="stats">
       <article class="stat accent"><div class="label">Npay 剩餘</div><div class="value">${krw(npayBalance())}</div></article>
       <article class="stat"><div class="label">${esc(now)} 實付</div><div class="value">${krw(monthPay)}</div></article>
@@ -1207,10 +1234,12 @@ function renderSync(root) {
           </label>
         </div>
         <p class="error" id="sync-error">${urlHint && url ? esc(urlHint) : ""}</p>
-        <p class="ok-msg" id="sync-ok">${ready && !urlHint ? "已記住部署網址。請按測試連線確認能寫入。" : ""}</p>
+        <p class="ok-msg" id="sync-ok">${ready && !urlHint ? "已記住部署網址。請按測試連線，不要急著去看試算表。" : ""}</p>
+        <div id="sync-detail"></div>
         <div class="item-actions">
           <button class="btn btn-primary" type="button" id="sync-save">儲存設定</button>
           <button class="btn" type="button" id="sync-ping">測試連線</button>
+          <button class="btn" type="button" id="sync-write">寫入測試列</button>
         </div>
       </section>
     </div>
@@ -1241,31 +1270,72 @@ function renderSync(root) {
     SheetsSync.saveConfig(next, document.getElementById("sync-secret").value);
     err.textContent = "";
     ok.textContent = "已記住部署網址，請按測試連線。";
+    const detail = document.getElementById("sync-detail");
+    if (detail) detail.innerHTML = "";
     notice = "";
+  };
+  const paintPing = (result, extraMsg) => {
+    rememberSheetInfo(result);
+    const err = document.getElementById("sync-error");
+    const ok = document.getElementById("sync-ok");
+    const detail = document.getElementById("sync-detail");
+    const old = result.version !== "write-v2";
+    const rows = (result.sheets || [])
+      .map((row) => `<li>${esc(row.name)}：${esc(String(row.rows))} 列</li>`)
+      .join("");
+    ok.textContent = extraMsg || (result.spreadsheet ? `連線成功：${result.spreadsheet}` : "連線成功");
+    err.textContent = old
+      ? "這還是舊版程式，所以試算表不會出現新資料。請把專案裡最新的 Code.gs 全部貼上，再部署「新版本」。"
+      : "";
+    detail.innerHTML = `
+      ${result.url ? `<p><a href="${esc(result.url)}" target="_blank" rel="noopener">打開目前連到的這份試算表</a></p>` : ""}
+      <p class="muted">資料在這些分頁：<strong>商品明細、購買訂單、Npay歷程、銀行卡明細、設定</strong>。不要只看「工作表1」。</p>
+      ${rows ? `<ul class="steps">${rows}</ul>` : "<p class='muted'>還沒讀到分頁清單，多半是舊版程式。</p>"}
+      ${old ? "" : "<p class='muted'>若列數都是 0，請按「寫入測試列」。成功後「設定」分頁會多一列「連線測試」。</p>"}
+    `;
   };
   document.getElementById("sync-ping").onclick = async () => {
     const next = document.getElementById("sync-url").value;
     const hint = SheetsSync.urlHint(next);
     const err = document.getElementById("sync-error");
     const ok = document.getElementById("sync-ok");
+    const detail = document.getElementById("sync-detail");
     if (hint) {
       err.textContent = hint;
       ok.textContent = "";
+      detail.innerHTML = "";
       return;
     }
     SheetsSync.saveConfig(next, document.getElementById("sync-secret").value);
     err.textContent = "";
     ok.textContent = "測試中…";
+    detail.innerHTML = "";
     const result = await SheetsSync.ping();
     if (result.ok) {
-      ok.textContent = result.spreadsheet
-        ? `連線成功：${result.spreadsheet}，正在載入資料…`
-        : "連線成功，正在載入試算表…";
-      await boot("dashboard");
+      paintPing(result);
     } else {
       ok.textContent = "";
+      detail.innerHTML = "";
       err.textContent = result.error || "連線失敗。請確認已部署為「任何人」可存取，且執行過 doGet 授權。";
     }
+  };
+  document.getElementById("sync-write").onclick = async () => {
+    const err = document.getElementById("sync-error");
+    const ok = document.getElementById("sync-ok");
+    err.textContent = "";
+    ok.textContent = "正在寫入測試列…";
+    const result = await SheetsSync.selftest();
+    if (!result.ok) {
+      ok.textContent = "";
+      err.textContent =
+        result.error === "未知的 action：selftest"
+          ? "連線有通，但程式是舊版，所以寫不進去。請把最新 Code.gs 貼上後，部署新版本，再按一次寫入測試列。"
+          : result.error || "寫入測試失敗";
+      return;
+    }
+    const ping = await SheetsSync.ping();
+    if (ping.ok) paintPing(ping, `寫入成功。請打開試算表的「設定」分頁，應看到「連線測試」。`);
+    else paintPing(result, `寫入成功。請打開試算表的「設定」分頁，應看到「連線測試」。`);
   };
 }
 
@@ -1277,6 +1347,7 @@ async function refreshFromSheets() {
   const result = await SheetsSync.load();
   if (result.ok && result.ledger) {
     ledger = result.ledger;
+    rememberSheetInfo(result);
     return result;
   }
   return {

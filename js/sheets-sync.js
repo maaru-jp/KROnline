@@ -52,6 +52,16 @@ const SheetsSync = {
     }
   },
 
+  async selftest() {
+    const hint = this.urlHint();
+    if (hint) return { ok: false, error: hint };
+    try {
+      return await this.jsonp("selftest");
+    } catch (err) {
+      return { ok: false, error: String(err.message || err) };
+    }
+  },
+
   async load() {
     const hint = this.urlHint();
     if (hint) return { ok: false, error: hint };
