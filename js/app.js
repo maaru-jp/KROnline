@@ -14,7 +14,7 @@ const NAV = [
 
 const SUB = {
   dashboard: "Npay 餘額、本月實付、各卡未對帳台幣",
-  "new-purchase": "先填商品，最後填台幣；填完會自動寫入試算表",
+  "new-purchase": "兩種記法：扣 Npay，或別家商品直接刷卡（韓幣＋手動台幣）",
   "npay-topup": "選卡並手動填台幣後，會自動寫入試算表",
   purchases: "點一筆訂單，看該筆完整商品明細；取消會補回 Npay 並記刷退",
   "npay-ledger": "儲值、扣除、取消訂單後的退款回補，每筆都留下剩餘點數",
@@ -141,13 +141,13 @@ function blankPurchase() {
     date: today(),
     shop: "Coupang",
     discount: "0",
+    payMethod: "npay",
     npay: "0",
     cardAmount: "0",
     cardTwd: "",
     card: "中信",
     note: "",
     items: [{ name: "", unitPrice: "", quantity: "1" }],
-    autoSplit: true,
   };
 }
 
@@ -338,6 +338,8 @@ function orderTable(orders, withAction) {
 }
 
 function renderPurchase(root) {
+  applyPayMethod();
+  const cardMode = purchaseForm.payMethod === "card";
   root.innerHTML = `
     <div class="grid-2">
       <section class="panel">
@@ -369,13 +371,16 @@ function renderPurchase(root) {
         </div>
       </section>
       <section class="panel">
-        <h2>付款與試算</h2>
+        <h2>怎麼付</h2>
+        <div class="tabs" style="margin-bottom:14px">
+          <button class="btn ${cardMode ? "" : "btn-primary"}" type="button" id="pay-npay">扣 Npay 點數</button>
+          <button class="btn ${cardMode ? "btn-primary" : ""}" type="button" id="pay-card">直接刷卡</button>
+        </div>
         <div class="totals" id="p-totals"></div>
-        <div class="form-grid" style="margin-top:12px">
-          <label class="field">使用 Npay
-            <input type="number" min="0" id="p-npay" value="${esc(purchaseForm.npay)}" />
-          </label>
-          <label class="field">刷卡韓幣
+        ${
+          cardMode
+            ? `<div class="form-grid" style="margin-top:12px">
+          <label class="field">共刷韓幣
             <input type="number" min="0" id="p-card-amt" value="${esc(purchaseForm.cardAmount)}" />
           </label>
           <label class="field">刷哪張卡
@@ -384,11 +389,13 @@ function renderPurchase(root) {
                 `<option ${purchaseForm.card === c ? "selected" : ""}>${esc(c)}</option>`,
             ).join("")}</select>
           </label>
-          <label class="field">台幣金額（手動填）
+          <label class="field field-span">台幣金額（手動填）
             <input type="number" min="0" step="1" id="p-card-twd" value="${esc(purchaseForm.cardTwd)}" placeholder="帳單上的台幣" />
           </label>
         </div>
-        <p class="muted">實付必須等於 Npay + 刷卡韓幣。請先填商品，最後手動填台幣；填完會自動寫入試算表（商品、刷卡、Npay 一併寫入）。</p>
+        <p class="muted">別家商品直接刷卡：韓幣預設等於實付，台幣請自己填。填完台幣會自動寫入試算表。</p>`
+            : `<p class="muted" style="margin-top:12px">用 Npay 扣掉實付韓幣，不記刷卡。商品填完後會自動寫入試算表。</p>`
+        }
         <p class="error" id="p-error">${formError ? esc(formError) : ""}</p>
         <p class="ok-msg" id="p-ok">${formOk ? esc(formOk) : ""}</p>
         <div class="item-actions">
@@ -401,7 +408,9 @@ function renderPurchase(root) {
   paintItemRows();
   paintPurchaseTotals();
   const keep = (id, key) => {
-    document.getElementById(id).oninput = (e) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.oninput = (e) => {
       purchaseForm[key] = e.target.value;
     };
   };
@@ -410,49 +419,62 @@ function renderPurchase(root) {
   keep("p-note", "note");
   document.getElementById("p-discount").oninput = (e) => {
     purchaseForm.discount = e.target.value;
-    if (purchaseForm.autoSplit) applySplit(calcPayable());
+    applyPayMethod();
     syncPayInputs();
     paintPurchaseTotals();
-  };
-  document.getElementById("p-npay").oninput = (e) => {
-    purchaseForm.npay = e.target.value;
-    purchaseForm.autoSplit = false;
-    purchaseForm.cardAmount = String(Math.max(0, calcPayable() - Number(e.target.value || 0)));
-    document.getElementById("p-card-amt").value = purchaseForm.cardAmount;
-    paintPurchaseTotals();
     maybeQueuePurchaseWrite();
   };
-  document.getElementById("p-card-amt").oninput = (e) => {
-    purchaseForm.cardAmount = e.target.value;
-    purchaseForm.autoSplit = false;
-    purchaseForm.npay = String(Math.max(0, calcPayable() - Number(e.target.value || 0)));
-    document.getElementById("p-npay").value = purchaseForm.npay;
-    paintPurchaseTotals();
-    maybeQueuePurchaseWrite();
+  document.getElementById("pay-npay").onclick = () => {
+    syncItemInputs();
+    purchaseForm.payMethod = "npay";
+    applyPayMethod();
+    render();
   };
-  document.getElementById("p-card-twd").oninput = (e) => {
-    purchaseForm.cardTwd = e.target.value;
-    paintPurchaseTotals();
-    maybeQueuePurchaseWrite();
+  document.getElementById("pay-card").onclick = () => {
+    syncItemInputs();
+    purchaseForm.payMethod = "card";
+    applyPayMethod();
+    render();
   };
-  document.getElementById("p-card-twd").onblur = () => maybeQueuePurchaseWrite();
-  document.getElementById("p-card-twd").onkeydown = (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      savePurchase();
-    }
-  };
-  document.getElementById("p-card").onchange = (e) => {
-    purchaseForm.card = e.target.value;
-    maybeQueuePurchaseWrite();
-  };
+  const cardAmtEl = document.getElementById("p-card-amt");
+  if (cardAmtEl) {
+    cardAmtEl.oninput = (e) => {
+      purchaseForm.cardAmount = e.target.value;
+      purchaseForm.npay = "0";
+      paintPurchaseTotals();
+    };
+  }
+  const cardTwdEl = document.getElementById("p-card-twd");
+  if (cardTwdEl) {
+    cardTwdEl.oninput = (e) => {
+      purchaseForm.cardTwd = e.target.value;
+      paintPurchaseTotals();
+      maybeQueuePurchaseWrite();
+    };
+    cardTwdEl.onblur = () => maybeQueuePurchaseWrite();
+    cardTwdEl.onkeydown = (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        savePurchase();
+      }
+    };
+  }
+  const cardEl = document.getElementById("p-card");
+  if (cardEl) {
+    cardEl.onchange = (e) => {
+      purchaseForm.card = e.target.value;
+      maybeQueuePurchaseWrite();
+    };
+  }
   document.getElementById("add-item").onclick = () => {
     syncItemInputs();
     purchaseForm.items.push({ name: "", unitPrice: "", quantity: "1" });
     paintItemRows();
+    applyPayMethod();
+    syncPayInputs();
     paintPurchaseTotals();
   };
-  document.getElementById("save-purchase").onclick = savePurchase;
+  document.getElementById("save-purchase").onclick = () => savePurchase();
   const openLast = document.getElementById("open-last");
   if (openLast) {
     openLast.onclick = () => openOrder(lastSavedOrderId, "new-purchase");
@@ -477,7 +499,7 @@ function paintItemRows() {
     el.oninput = () => {
       const i = Number(el.dataset.i);
       purchaseForm.items[i][el.dataset.k] = el.value;
-      if (purchaseForm.autoSplit) applySplit(calcPayable());
+      applyPayMethod();
       const total = Number(purchaseForm.items[i].unitPrice || 0) * Number(purchaseForm.items[i].quantity || 0);
       tbody.querySelector(`[data-total="${i}"]`).textContent = krw(total);
       syncPayInputs();
@@ -490,10 +512,11 @@ function paintItemRows() {
       if (purchaseForm.items.length === 1) return;
       syncItemInputs();
       purchaseForm.items.splice(Number(el.dataset.del), 1);
-      if (purchaseForm.autoSplit) applySplit(calcPayable());
+      applyPayMethod();
       paintItemRows();
       syncPayInputs();
       paintPurchaseTotals();
+      maybeQueuePurchaseWrite();
     };
   });
 }
@@ -514,18 +537,19 @@ function paintPurchaseTotals() {
   const remain = npayBalance() - npayAmt;
   const box = document.getElementById("p-totals");
   if (!box) return;
+  const cardMode = purchaseForm.payMethod === "card";
   box.innerHTML = `
     <div><span>商品合計</span><span>${krw(goods)}</span></div>
     <div><span>店家折扣</span><span>− ${krw(discount)}</span></div>
-    <div class="pay"><span>實付</span><span>${krw(payable)}</span></div>
-    <div><span>Npay ${krw(npayAmt)} + ${esc(purchaseForm.card || "卡")} ${krw(cardAmt)}</span><span>${npayAmt + cardAmt === payable ? "相符" : "需等於實付"}</span></div>
+    <div class="pay"><span>實付韓幣</span><span>${krw(payable)}</span></div>
     ${
-      cardAmt > 0
-        ? `<div><span>刷卡台幣（手動）</span><span>${purchaseForm.cardTwd ? twd(Number(purchaseForm.cardTwd)) : "尚未填"}</span></div>`
-        : ""
-    }
+      cardMode
+        ? `<div><span>刷卡 ${esc(purchaseForm.card || "卡")}</span><span>${krw(cardAmt)}${cardAmt === payable ? "" : "（需等於實付）"}</span></div>
+    <div><span>台幣（手動）</span><span>${purchaseForm.cardTwd ? twd(Number(purchaseForm.cardTwd)) : "尚未填"}</span></div>`
+        : `<div><span>Npay 扣除</span><span>${krw(npayAmt)}</span></div>
     <div><span>目前 Npay 餘額</span><span>${krw(npayBalance())}</span></div>
-    <div><span>送出後 Npay</span><span class="${remain < 0 ? "debit" : ""}">${remain < 0 ? "餘額不足" : krw(remain)}</span></div>
+    <div><span>送出後 Npay</span><span class="${remain < 0 ? "debit" : ""}">${remain < 0 ? "餘額不足" : krw(remain)}</span></div>`
+    }
   `;
 }
 
@@ -540,18 +564,21 @@ function calcPayable() {
   return calcGoods() - Number(purchaseForm.discount || 0);
 }
 
-function applySplit(payable) {
-  if (!purchaseForm.autoSplit) return;
-  const npayAmt = Math.min(npayBalance(), Math.max(0, payable));
-  purchaseForm.npay = String(npayAmt);
-  purchaseForm.cardAmount = String(Math.max(0, payable - npayAmt));
+function applyPayMethod() {
+  const payable = Math.max(0, calcPayable());
+  if (purchaseForm.payMethod === "card") {
+    purchaseForm.npay = "0";
+    purchaseForm.cardAmount = String(payable);
+  } else {
+    purchaseForm.payMethod = "npay";
+    purchaseForm.npay = String(payable);
+    purchaseForm.cardAmount = "0";
+  }
 }
 
 function syncPayInputs() {
-  const npayEl = document.getElementById("p-npay");
   const cardEl = document.getElementById("p-card-amt");
   const twdEl = document.getElementById("p-card-twd");
-  if (npayEl) npayEl.value = purchaseForm.npay;
   if (cardEl) cardEl.value = purchaseForm.cardAmount;
   if (twdEl) twdEl.value = purchaseForm.cardTwd;
 }
@@ -570,10 +597,12 @@ async function savePurchase(opts = {}) {
     purchaseForm.shop = document.getElementById("p-shop").value;
     purchaseForm.discount = document.getElementById("p-discount").value;
     purchaseForm.note = document.getElementById("p-note").value;
-    purchaseForm.npay = document.getElementById("p-npay").value;
-    purchaseForm.cardAmount = document.getElementById("p-card-amt").value;
-    purchaseForm.card = document.getElementById("p-card").value;
-    purchaseForm.cardTwd = document.getElementById("p-card-twd").value;
+    const cardAmtEl = document.getElementById("p-card-amt");
+    const cardEl = document.getElementById("p-card");
+    const twdEl = document.getElementById("p-card-twd");
+    if (cardAmtEl) purchaseForm.cardAmount = cardAmtEl.value;
+    if (cardEl) purchaseForm.card = cardEl.value;
+    if (twdEl) purchaseForm.cardTwd = twdEl.value;
   }
   const items = purchaseForm.items
     .map((row) => ({
@@ -597,16 +626,18 @@ async function savePurchase(opts = {}) {
   const discount = Number(purchaseForm.discount || 0);
   if (discount < 0 || discount > goods) return skip("店家折扣需介於 0 與商品合計之間");
   const payable = goods - discount;
-  const npayUsed = Number(purchaseForm.npay || 0);
-  const cardAmount = Number(purchaseForm.cardAmount || 0);
+  const cardMode = purchaseForm.payMethod === "card";
+  const npayUsed = cardMode ? 0 : payable;
+  const cardAmount = cardMode ? Number(purchaseForm.cardAmount || payable) : 0;
   if (npayUsed + cardAmount !== payable)
-    return skip(`實付 ${krw(payable)} 必須等於 Npay + 刷卡`);
+    return skip(`實付 ${krw(payable)} 必須等於 ${cardMode ? "刷卡韓幣" : "Npay"}`);
   if (npayUsed > npayBalance())
     return fail(`Npay 餘額不足，目前 ${krw(npayBalance())}`);
-  if (cardAmount > 0 && !purchaseForm.card) return skip("刷卡時請選擇富邦或中信");
+  if (cardMode && !purchaseForm.card) return skip("刷卡時請選擇富邦或中信");
   const cardTwdAmt = Number(purchaseForm.cardTwd || 0);
-  if (cardAmount > 0 && !(cardTwdAmt > 0)) return skip("刷卡請手動填台幣金額");
-  if (auto && !(cardAmount > 0 && cardTwdAmt > 0)) return;
+  if (cardMode && !(cardTwdAmt > 0)) return skip("刷卡請手動填台幣金額");
+  if (auto && cardMode && !(cardAmount > 0 && cardTwdAmt > 0)) return;
+  if (auto && !cardMode && !(npayUsed > 0)) return;
   const fxRate = cardAmount > 0 ? derivedFxRate(cardAmount, cardTwdAmt) : 0;
   if (!SheetsSync.configured()) return fail(SheetsSync.urlHint() || "請先到「同步試算表」貼上 Apps Script 的 /exec 網址");
 
@@ -642,7 +673,9 @@ async function savePurchase(opts = {}) {
     Object.assign(purchaseForm, blankPurchase());
     lastSavedOrderId = result.orderId || ledger.orders[ledger.orders.length - 1]?.id || "";
     formError = "";
-    formOk = `已寫入試算表${lastSavedOrderId ? " " + lastSavedOrderId : ""}，實付 ${krw(payable)}${cardAmount > 0 ? `，刷卡 ${krw(cardAmount)}／${twd(cardTwdAmt)}` : ""}。Npay 剩餘 ${krw(npayBalance())}。`;
+    formOk = `已寫入試算表${lastSavedOrderId ? " " + lastSavedOrderId : ""}，實付 ${krw(payable)}${
+      cardAmount > 0 ? `，刷卡 ${krw(cardAmount)}／${twd(cardTwdAmt)}` : `，Npay ${krw(npayUsed)}`
+    }。Npay 剩餘 ${krw(npayBalance())}。`;
     lastOkView = "new-purchase";
     render();
   } finally {
@@ -658,9 +691,11 @@ function fail(message) {
 }
 
 function maybeQueuePurchaseWrite() {
-  const cardAmt = Number(purchaseForm.cardAmount || 0);
-  const twdAmt = Number(purchaseForm.cardTwd || 0);
-  if (!(cardAmt > 0) || !(twdAmt > 0)) return;
+  if (purchaseForm.payMethod === "card") {
+    if (!(Number(purchaseForm.cardAmount) > 0) || !(Number(purchaseForm.cardTwd) > 0)) return;
+  } else if (!(Number(purchaseForm.npay) > 0)) {
+    return;
+  }
   clearTimeout(purchaseWriteTimer);
   purchaseWriteTimer = setTimeout(() => savePurchase({ auto: true }), 900);
 }
