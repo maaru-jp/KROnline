@@ -15,24 +15,51 @@ const SheetsSync = {
     localStorage.setItem(this.secretKey, (secret || "").trim());
   },
 
+  urlKind(url) {
+    const value = (url || this.getUrl() || "").trim();
+    if (/docs\.google\.com\/spreadsheets/i.test(value)) return "sheet";
+    if (/^https:\/\/script\.google\.com\/macros\/s\//i.test(value)) return "script";
+    if (/^https:\/\/script\.google\.com\//i.test(value)) return "script-other";
+    return value ? "unknown" : "empty";
+  },
+
+  urlHint(url) {
+    const kind = this.urlKind(url);
+    if (kind === "sheet") {
+      return "這是 Google 試算表連結（docs.google.com），網頁沒辦法寫進去。請改貼 Apps Script「網頁應用程式」部署網址，開頭是 script.google.com，結尾是 /exec。";
+    }
+    if (kind === "empty") return "請貼 Apps Script 部署網址，不是試算表網址。";
+    if (kind === "unknown") {
+      return "網址不正確。需要 https://script.google.com/macros/s/…/exec";
+    }
+    if (kind === "script-other") {
+      return "請貼部署後的網址，通常結尾是 /exec。不要貼編輯器或試算表連結。";
+    }
+    return "";
+  },
+
   configured() {
-    return /^https:\/\/script\.google\.com\//.test(this.getUrl());
+    return this.urlKind() === "script";
   },
 
   async ping() {
+    const hint = this.urlHint();
+    if (hint) return { ok: false, error: hint };
     try {
       return await this.jsonp("ping");
     } catch (err) {
-      return this.send({ action: "ping" });
+      return { ok: false, error: String(err.message || err) };
     }
   },
 
   async load() {
+    const hint = this.urlHint();
+    if (hint) return { ok: false, error: hint };
     let result;
     try {
       result = await this.jsonp("load");
     } catch (err) {
-      result = await this.send({ action: "load" });
+      return { ok: false, error: String(err.message || err) };
     }
     if (!result.ok) return result;
     if (!result.ledger && (result.items || result.orders || result.npay || result.cards)) {
@@ -52,7 +79,7 @@ const SheetsSync = {
     return result;
   },
 
-  jsonp(action) {
+  jsonp(action, extra) {
     return new Promise((resolve, reject) => {
       const url = this.getUrl();
       if (!url) {
@@ -76,12 +103,23 @@ const SheetsSync = {
       };
       script.onerror = () => {
         cleanup();
-        reject(new Error("無法連線試算表"));
+        reject(new Error("無法連線。請確認貼的是 /exec 部署網址，且存取對象是「任何人」。"));
       };
-      const target = new URL(url);
+      let target;
+      try {
+        target = new URL(url);
+      } catch (err) {
+        cleanup();
+        reject(new Error("網址格式不正確"));
+        return;
+      }
       target.searchParams.set("action", action);
       target.searchParams.set("callback", cb);
       if (this.getSecret()) target.searchParams.set("secret", this.getSecret());
+      Object.entries(extra || {}).forEach(([key, value]) => {
+        if (value == null || value === "") return;
+        target.searchParams.set(key, String(value));
+      });
       script.src = target.toString();
       document.body.appendChild(script);
     });
@@ -103,32 +141,16 @@ const SheetsSync = {
   },
 
   async send(payload) {
-    const url = this.getUrl();
-    if (!url) return { ok: false, skipped: true, error: "尚未設定試算表網址" };
-    const body = JSON.stringify({
+    const hint = this.urlHint();
+    if (hint) return { ok: false, error: hint };
+    const body = {
       ...payload,
       secret: this.getSecret() || undefined,
-    });
+    };
     try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "text/plain;charset=utf-8" },
-        body,
-      });
-      const text = await res.text();
-      return JSON.parse(text);
+      return await this.jsonp(payload.action, { payload: JSON.stringify(body) });
     } catch (err) {
-      try {
-        await fetch(url, {
-          method: "POST",
-          mode: "no-cors",
-          headers: { "Content-Type": "text/plain;charset=utf-8" },
-          body,
-        });
-        return { ok: true, opaque: true };
-      } catch (err2) {
-        return { ok: false, error: String(err.message || err) };
-      }
+      return { ok: false, error: String(err.message || err) };
     }
   },
 

@@ -196,7 +196,7 @@ function renderNav() {
       const next = btn.dataset.view;
       if (next !== "sync" && !SheetsSync.configured()) {
         view = "sync";
-        notice = "請先接上試算表。記帳資料只寫在 Google 試算表，不會存在這個瀏覽器。";
+        notice = SheetsSync.urlHint() || "請先接上試算表。要貼的是 Apps Script 的 /exec 網址，不是試算表連結。";
         render();
         return;
       }
@@ -581,40 +581,46 @@ async function savePurchase(opts = {}) {
   if (cardAmount > 0 && !(cardTwdAmt > 0)) return skip("刷卡請手動填台幣金額");
   if (auto && !(cardAmount > 0 && cardTwdAmt > 0)) return;
   const fxRate = cardAmount > 0 ? derivedFxRate(cardAmount, cardTwdAmt) : 0;
-  if (!SheetsSync.configured()) return fail("請先到「同步試算表」接上試算表網址");
+  if (!SheetsSync.configured()) return fail(SheetsSync.urlHint() || "請先到「同步試算表」貼上 Apps Script 的 /exec 網址");
 
   writeLock = true;
   const beforeCount = ledger.orders.length;
   formError = "";
   formOk = "正在寫入 Google 試算表…";
   render();
-  const result = await SheetsSync.pushPurchase({
-    order: {
-      date: purchaseForm.date,
-      shop: purchaseForm.shop.trim(),
-      storeDiscount: discount,
-      npayUsed,
-      cardAmount,
-      card: cardAmount > 0 ? purchaseForm.card : "",
-      fxRate: cardAmount > 0 ? fxRate : 0,
-      cardTwd: cardAmount > 0 ? cardTwdAmt : 0,
-      note: purchaseForm.note.trim(),
-    },
-    items,
-  });
-  const loaded = await refreshFromSheets();
-  writeLock = false;
-  if (!result.ok && !result.opaque) return fail(SheetsSync.label(result));
-  if (!loaded.ok) return fail(loaded.error || "已送出，但無法從試算表讀回");
-  if (result.opaque && ledger.orders.length <= beforeCount) {
-    return fail("試算表沒有新增列。請確認已部署為「任何人」，且程式已部署新版本。");
+  try {
+    const result = await SheetsSync.pushPurchase({
+      order: {
+        date: purchaseForm.date,
+        shop: purchaseForm.shop.trim(),
+        storeDiscount: discount,
+        npayUsed,
+        cardAmount,
+        card: cardAmount > 0 ? purchaseForm.card : "",
+        fxRate: cardAmount > 0 ? fxRate : 0,
+        cardTwd: cardAmount > 0 ? cardTwdAmt : 0,
+        note: purchaseForm.note.trim(),
+      },
+      items,
+    });
+    const loaded = await refreshFromSheets();
+    if (!result.ok && !result.opaque) return fail(SheetsSync.label(result));
+    if (!loaded.ok) return fail(loaded.error || "已送出，但無法從試算表讀回");
+    if (result.opaque && ledger.orders.length <= beforeCount) {
+      return fail("試算表沒有新增列。請把最新 Code.gs 貼上後，部署新版本，存取對象選「任何人」。");
+    }
+    if (ledger.orders.length <= beforeCount) {
+      return fail("連線到了，但試算表沒有新列。請把最新 Code.gs 貼上後再部署一次新版本。");
+    }
+    Object.assign(purchaseForm, blankPurchase());
+    lastSavedOrderId = result.orderId || ledger.orders[ledger.orders.length - 1]?.id || "";
+    formError = "";
+    formOk = `已寫入試算表${lastSavedOrderId ? " " + lastSavedOrderId : ""}，實付 ${krw(payable)}${cardAmount > 0 ? `，刷卡 ${krw(cardAmount)}／${twd(cardTwdAmt)}` : ""}。Npay 剩餘 ${krw(npayBalance())}。`;
+    lastOkView = "new-purchase";
+    render();
+  } finally {
+    writeLock = false;
   }
-  Object.assign(purchaseForm, blankPurchase());
-  lastSavedOrderId = result.orderId || ledger.orders[ledger.orders.length - 1]?.id || "";
-  formError = "";
-  formOk = `已寫入試算表${lastSavedOrderId ? " " + lastSavedOrderId : ""}，實付 ${krw(payable)}${cardAmount > 0 ? `，刷卡 ${krw(cardAmount)}／${twd(cardTwdAmt)}` : ""}。Npay 剩餘 ${krw(npayBalance())}。`;
-  lastOkView = "new-purchase";
-  render();
 }
 
 function fail(message) {
@@ -715,30 +721,36 @@ async function saveTopup(opts = {}) {
   if (!(amount > 0)) return skip("儲值金額必須大於 0");
   if (!(amountTwd > 0)) return skip("請手動填台幣金額");
   const fxRate = derivedFxRate(amount, amountTwd);
-  if (!SheetsSync.configured()) return fail("請先到「同步試算表」接上試算表網址");
+  if (!SheetsSync.configured()) return fail(SheetsSync.urlHint() || "請先到「同步試算表」貼上 Apps Script 的 /exec 網址");
   writeLock = true;
   const before = ledger.npay.length;
   formError = "";
   formOk = "正在寫入 Google 試算表…";
   render();
-  const result = await SheetsSync.pushTopup({
-    date: topupForm.date,
-    amount,
-    card: topupForm.card,
-    fxRate,
-    amountTwd,
-  });
-  const loaded = await refreshFromSheets();
-  writeLock = false;
-  if (!result.ok && !result.opaque) return fail(SheetsSync.label(result));
-  if (!loaded.ok) return fail(loaded.error || "已送出，但無法從試算表讀回");
-  if (result.opaque && ledger.npay.length <= before) {
-    return fail("試算表沒有新增列。請確認已部署為「任何人」，且程式已部署新版本。");
+  try {
+    const result = await SheetsSync.pushTopup({
+      date: topupForm.date,
+      amount,
+      card: topupForm.card,
+      fxRate,
+      amountTwd,
+    });
+    const loaded = await refreshFromSheets();
+    if (!result.ok && !result.opaque) return fail(SheetsSync.label(result));
+    if (!loaded.ok) return fail(loaded.error || "已送出，但無法從試算表讀回");
+    if (result.opaque && ledger.npay.length <= before) {
+      return fail("試算表沒有新增列。請把最新 Code.gs 貼上後，部署新版本，存取對象選「任何人」。");
+    }
+    if (ledger.npay.length <= before) {
+      return fail("連線到了，但試算表沒有新列。請把最新 Code.gs 貼上後再部署一次新版本。");
+    }
+    topupForm.amount = "";
+    topupForm.amountTwd = "";
+    formOk = `已寫入試算表，儲值 ${krw(amount)}／${twd(amountTwd)}，Npay 剩餘 ${krw(npayBalance())}，記入 ${topupForm.card}。`;
+    render();
+  } finally {
+    writeLock = false;
   }
-  topupForm.amount = "";
-  topupForm.amountTwd = "";
-  formOk = `已寫入試算表，儲值 ${krw(amount)}／${twd(amountTwd)}，Npay 剩餘 ${krw(npayBalance())}，記入 ${topupForm.card}。`;
-  render();
 }
 
 function renderPurchases(root) {
@@ -1167,24 +1179,25 @@ function renderSync(root) {
   const url = SheetsSync.getUrl();
   const secret = SheetsSync.getSecret();
   const ready = SheetsSync.configured();
+  const urlHint = SheetsSync.urlHint(url);
   root.innerHTML = `
     <div class="grid-2">
       <section class="panel">
         <h2>部署步驟（做一次即可）</h2>
         <ol class="steps">
-          <li>開一份 Google 試算表，建立五個工作表：<strong>商品明細、購買訂單、Npay歷程、銀行卡明細、設定</strong>，第一列貼上對應表頭。銀行卡明細需有「匯率、金額TWD」兩欄；若沒有，部署新版後會自動補上。</li>
+          <li>開一份 Google 試算表，建立五個工作表：<strong>商品明細、購買訂單、Npay歷程、銀行卡明細、設定</strong>。</li>
           <li>試算表選單：<strong>擴充功能 → Apps Script</strong>。</li>
           <li>刪掉預設內容，貼上專案裡 <code>apps-script/Code.gs</code> 的全部程式，按儲存。</li>
           <li>在編輯器選 <code>doGet</code>，按「執行」，允許存取這份試算表。</li>
           <li>右上角 <strong>部署 → 新部署</strong>。類型選「網頁應用程式」。執行身分選「我」，存取對象選「任何人」（即使未登入也可以）。</li>
-          <li>部署後複製網址（會像 <code>https://script.google.com/macros/s/…/exec</code>），貼到右邊欄位並儲存。</li>
-          <li>按「測試連線」。成功後會自動載入試算表，之後在網頁登記就直接寫入，不會存在本機。</li>
+          <li>複製的網址必須是 <code>https://script.google.com/macros/s/…/exec</code>。<strong>不要貼試算表本身的 docs.google.com 連結</strong>，那個不能寫入。</li>
+          <li>貼到右邊、儲存，再按「測試連線」。成功後，登記才會寫進試算表。</li>
         </ol>
         <p class="muted">若之後改過程式，必須再「部署 → 管理部署 → 編輯 → 新版本」，網址才會用到新程式。</p>
       </section>
       <section class="panel">
         <h2>本機連線</h2>
-        <p class="muted">試算表是唯一帳本。這個瀏覽器只記住網址，不存放購買或 Npay 資料。</p>
+        <p class="muted">這裡要貼的是 Apps Script 部署網址，不是試算表分享連結。</p>
         <div class="form-grid">
           <label class="field field-span">Apps Script 網頁應用程式網址
             <input id="sync-url" value="${esc(url)}" placeholder="https://script.google.com/macros/s/…/exec" />
@@ -1193,8 +1206,8 @@ function renderSync(root) {
             <input id="sync-secret" value="${esc(secret)}" placeholder="沒有設定可留空" />
           </label>
         </div>
-        <p class="error" id="sync-error"></p>
-        <p class="ok-msg" id="sync-ok"></p>
+        <p class="error" id="sync-error">${urlHint && url ? esc(urlHint) : ""}</p>
+        <p class="ok-msg" id="sync-ok">${ready && !urlHint ? "已記住部署網址。請按測試連線確認能寫入。" : ""}</p>
         <div class="item-actions">
           <button class="btn btn-primary" type="button" id="sync-save">儲存設定</button>
           <button class="btn" type="button" id="sync-ping">測試連線</button>
@@ -1202,22 +1215,45 @@ function renderSync(root) {
       </section>
     </div>
   `;
+  const showUrlState = () => {
+    const next = document.getElementById("sync-url").value;
+    const hint = SheetsSync.urlHint(next);
+    const err = document.getElementById("sync-error");
+    const ok = document.getElementById("sync-ok");
+    if (hint) {
+      err.textContent = hint;
+      ok.textContent = "";
+    } else {
+      err.textContent = "";
+    }
+  };
+  document.getElementById("sync-url").oninput = showUrlState;
   document.getElementById("sync-save").onclick = () => {
-    SheetsSync.saveConfig(
-      document.getElementById("sync-url").value,
-      document.getElementById("sync-secret").value,
-    );
-    document.getElementById("sync-ok").textContent = "已記住網址，請按測試連線。";
-    document.getElementById("sync-error").textContent = "";
+    const next = document.getElementById("sync-url").value;
+    const hint = SheetsSync.urlHint(next);
+    const err = document.getElementById("sync-error");
+    const ok = document.getElementById("sync-ok");
+    if (hint) {
+      err.textContent = hint;
+      ok.textContent = "";
+      return;
+    }
+    SheetsSync.saveConfig(next, document.getElementById("sync-secret").value);
+    err.textContent = "";
+    ok.textContent = "已記住部署網址，請按測試連線。";
     notice = "";
   };
   document.getElementById("sync-ping").onclick = async () => {
-    SheetsSync.saveConfig(
-      document.getElementById("sync-url").value,
-      document.getElementById("sync-secret").value,
-    );
+    const next = document.getElementById("sync-url").value;
+    const hint = SheetsSync.urlHint(next);
     const err = document.getElementById("sync-error");
     const ok = document.getElementById("sync-ok");
+    if (hint) {
+      err.textContent = hint;
+      ok.textContent = "";
+      return;
+    }
+    SheetsSync.saveConfig(next, document.getElementById("sync-secret").value);
     err.textContent = "";
     ok.textContent = "測試中…";
     const result = await SheetsSync.ping();
@@ -1256,6 +1292,7 @@ async function boot(nextView) {
   if (!SheetsSync.configured()) {
     ledger = emptyLedger();
     view = "sync";
+    notice = SheetsSync.urlHint() || "請先貼上 Apps Script 部署網址（結尾 /exec），不要貼試算表連結。";
     render();
     return;
   }

@@ -43,6 +43,19 @@ function doPost(e) {
 function handle_(data) {
   data = data || {};
   CALLBACK_ = data.callback || "";
+  if (data.payload) {
+    try {
+      var parsed = typeof data.payload === "string" ? JSON.parse(data.payload) : data.payload;
+      var key;
+      for (key in parsed) {
+        if (Object.prototype.hasOwnProperty.call(parsed, key) && key !== "callback") {
+          data[key] = parsed[key];
+        }
+      }
+    } catch (err) {
+      return json_({ ok: false, error: "寫入資料格式不正確" });
+    }
+  }
   try {
     checkSecret_(data.secret);
     var action = data.action || "ping";
