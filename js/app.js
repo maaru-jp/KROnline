@@ -1,4 +1,3 @@
-const STORAGE_KEY = "kronline-ledger-v3";
 const CARDS = ["富邦", "中信"];
 const SHOPS = ["Coupang", "Olive Young", "29CM", "Musinsa", "其他"];
 
@@ -10,6 +9,7 @@ const NAV = [
   ["npay-ledger", "Npay 歷程"],
   ["cards", "銀行卡對帳"],
   ["sheets", "試算表預覽"],
+  ["sync", "同步試算表"],
 ];
 
 const SUB = {
@@ -19,66 +19,13 @@ const SUB = {
   purchases: "點一筆訂單，看該筆完整商品明細",
   "npay-ledger": "儲值／扣除時間軸，每筆都留下剩餘點數",
   cards: "富邦、中信分開對銀行帳單",
-  sheets: "確認後會自動寫入 Google 試算表的欄位長相",
+  sheets: "試算表目前的資料",
+  sync: "試算表是唯一帳本；這裡只記住連線網址",
   "order-detail": "這一筆的全部商品、折扣、Npay 與刷卡",
 };
 
-function seedLedger() {
-  return {
-    items: [
-      item("I-001", "P-001", "2026-08-05", "Coupang", "洗面乳", 29000, 2),
-      item("I-002", "P-002", "2026-08-12", "Olive Young", "防曬乳", 16000, 1),
-      item("I-003", "P-002", "2026-08-12", "Olive Young", "唇膏", 16000, 1),
-      item("I-004", "P-003", "2026-08-20", "29CM", "襯衫", 45000, 1),
-    ],
-    orders: [
-      order("P-001", "2026-08-05", "Coupang", 8000, 50000, 0, undefined, ""),
-      order("P-002", "2026-08-12", "Olive Young", 2000, 20000, 10000, "中信", ""),
-      order("P-003", "2026-08-20", "29CM", 0, 0, 45000, "中信", ""),
-    ],
-    npay: [
-      npay("N-001", "2026-08-01", "儲值", 100000, 0, 100000, "富邦"),
-      npay("N-002", "2026-08-05", "消費扣除", 0, 50000, 50000, undefined, "P-001"),
-      npay("N-003", "2026-08-12", "消費扣除", 0, 20000, 30000, undefined, "P-002"),
-    ],
-    cards: [
-      card("C-001", "2026-08-01", "富邦", "Npay儲值", 100000, "N-001", false),
-      card("C-002", "2026-08-12", "中信", "購物補差額", 10000, "P-002", false),
-      card("C-003", "2026-08-20", "中信", "直接刷卡", 45000, "P-003", false),
-    ],
-    seeded: true,
-  };
-}
-
-function item(id, orderId, date, shop, name, unitPrice, quantity) {
-  return { id, orderId, date, shop, name, unitPrice, quantity };
-}
-function order(id, date, shop, storeDiscount, npayUsed, cardAmount, cardName, note) {
-  return { id, date, shop, storeDiscount, npayUsed, cardAmount, card: cardName, note };
-}
-function npay(id, date, type, credit, debit, balance, topUpCard, relatedOrderId) {
-  return { id, date, type, credit, debit, balance, topUpCard, relatedOrderId };
-}
-function card(id, date, cardName, type, amount, relatedId, reconciled) {
-  return { id, date, card: cardName, type, amount, relatedId, reconciled };
-}
-
 function emptyLedger() {
-  return { items: [], orders: [], npay: [], cards: [], seeded: false };
-}
-
-function load() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return seedLedger();
-    return JSON.parse(raw);
-  } catch {
-    return seedLedger();
-  }
-}
-
-function save() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(ledger));
+  return { items: [], orders: [], npay: [], cards: [] };
 }
 
 function esc(value) {
@@ -93,14 +40,6 @@ function krw(n) {
 
 function today() {
   return new Date().toISOString().slice(0, 10);
-}
-
-function nextId(prefix, rows) {
-  const max = rows.reduce((acc, row) => {
-    const num = Number(String(row.id).replace(/^[A-Z]+-/, ""));
-    return Number.isFinite(num) ? Math.max(acc, num) : acc;
-  }, 0);
-  return `${prefix}-${String(max + 1).padStart(3, "0")}`;
 }
 
 function itemTotal(row) {
@@ -148,7 +87,7 @@ function bindOrderLinks(root) {
   });
 }
 
-let ledger = load();
+let ledger = emptyLedger();
 let view = "dashboard";
 let cardTab = "富邦";
 let sheetTab = "商品明細";
@@ -198,6 +137,7 @@ function render() {
     "npay-ledger": renderNpay,
     cards: renderCards,
     sheets: renderSheets,
+    sync: renderSync,
     "order-detail": renderOrderDetail,
   };
   pages[view](root);
@@ -214,7 +154,14 @@ function renderNav() {
   ).join("");
   document.querySelectorAll("#nav [data-view]").forEach((btn) => {
     btn.onclick = () => {
-      view = btn.dataset.view;
+      const next = btn.dataset.view;
+      if (next !== "sync" && !SheetsSync.configured()) {
+        view = "sync";
+        notice = "請先接上試算表。記帳資料只寫在 Google 試算表，不會存在這個瀏覽器。";
+        render();
+        return;
+      }
+      view = next;
       notice = "";
       render();
     };
@@ -223,8 +170,8 @@ function renderNav() {
 
 function renderBanner() {
   const el = document.getElementById("banner");
-  if (ledger.seeded) {
-    el.innerHTML = `<div class="banner">目前顯示示範資料（富邦儲值 Npay；購物有純 Npay、Npay+中信、純刷中信）。確認畫面後可清除。Google 試算表自動寫入尚未接上。</div>`;
+  if (!SheetsSync.configured()) {
+    el.innerHTML = `<div class="banner">記帳資料只存在 Google 試算表。請先完成右側連線，之後在網頁登記就會直接寫入試算表。</div>`;
   } else if (notice) {
     el.innerHTML = `<div class="banner">${esc(notice)}</div>`;
   } else {
@@ -235,23 +182,9 @@ function renderBanner() {
 function renderTopbar() {
   const box = document.getElementById("topbar-actions");
   box.innerHTML = `
-    <button class="btn" type="button" id="btn-seed">載入示範</button>
-    <button class="btn btn-danger" type="button" id="btn-reset">清除資料</button>
+    <button class="btn" type="button" id="btn-reload">重新載入試算表</button>
   `;
-  document.getElementById("btn-seed").onclick = () => {
-    ledger = seedLedger();
-    save();
-    view = "dashboard";
-    render();
-  };
-  document.getElementById("btn-reset").onclick = () => {
-    if (!confirm("清除本機全部記帳資料？")) return;
-    ledger = emptyLedger();
-    save();
-    view = "dashboard";
-    notice = "已清空。可從「新增購買」或「Npay 儲值」開始登第一筆。";
-    render();
-  };
+  document.getElementById("btn-reload").onclick = () => boot(view);
 }
 
 function renderDashboard(root) {
@@ -526,7 +459,7 @@ function syncPayInputs() {
   if (cardEl) cardEl.value = purchaseForm.cardAmount;
 }
 
-function savePurchase() {
+async function savePurchase() {
   lastErrorView = "new-purchase";
   lastOkView = "new-purchase";
   formOk = "";
@@ -566,58 +499,35 @@ function savePurchase() {
   if (npayUsed > npayBalance())
     return fail(`Npay 餘額不足，目前 ${krw(npayBalance())}`);
   if (cardAmount > 0 && !purchaseForm.card) return fail("刷卡時請選擇富邦或中信");
+  if (!SheetsSync.configured()) return fail("請先到「同步試算表」接上試算表網址");
 
-  const orderId = nextId("P", ledger.orders);
-  items.forEach((row) => {
-    ledger.items.push({
-      id: nextId("I", ledger.items),
-      orderId,
+  const beforeCount = ledger.orders.length;
+  formError = "";
+  formOk = "正在寫入 Google 試算表…";
+  render();
+  const result = await SheetsSync.pushPurchase({
+    order: {
       date: purchaseForm.date,
       shop: purchaseForm.shop.trim(),
-      name: row.name,
-      unitPrice: row.unitPrice,
-      quantity: row.quantity,
-    });
+      storeDiscount: discount,
+      npayUsed,
+      cardAmount,
+      card: cardAmount > 0 ? purchaseForm.card : "",
+      note: purchaseForm.note.trim(),
+    },
+    items,
   });
-  ledger.orders.push({
-    id: orderId,
-    date: purchaseForm.date,
-    shop: purchaseForm.shop.trim(),
-    storeDiscount: discount,
-    npayUsed,
-    cardAmount,
-    card: cardAmount > 0 ? purchaseForm.card : undefined,
-    note: purchaseForm.note.trim(),
-  });
-  if (npayUsed > 0) {
-    const balance = npayBalance() - npayUsed;
-    ledger.npay.push({
-      id: nextId("N", ledger.npay),
-      date: purchaseForm.date,
-      type: "消費扣除",
-      credit: 0,
-      debit: npayUsed,
-      balance,
-      relatedOrderId: orderId,
-    });
+  const loaded = await refreshFromSheets();
+  if (!result.ok && !result.opaque) return fail(SheetsSync.label(result));
+  if (!loaded.ok) return fail(loaded.error || "已送出，但無法從試算表讀回");
+  if (result.opaque && ledger.orders.length <= beforeCount) {
+    return fail("試算表沒有新增列。請確認已部署為「任何人」，且程式已部署新版本。");
   }
-  if (cardAmount > 0) {
-    ledger.cards.push({
-      id: nextId("C", ledger.cards),
-      date: purchaseForm.date,
-      card: purchaseForm.card,
-      type: npayUsed > 0 ? "購物補差額" : "直接刷卡",
-      amount: cardAmount,
-      relatedId: orderId,
-      reconciled: false,
-    });
-  }
-  ledger.seeded = false;
-  save();
   Object.assign(purchaseForm, blankPurchase());
+  lastSavedOrderId = result.orderId || ledger.orders[ledger.orders.length - 1]?.id || "";
   formError = "";
-  formOk = `已登記 ${orderId}，實付 ${krw(payable)}。Npay 剩餘 ${krw(npayBalance())}。`;
-  lastSavedOrderId = orderId;
+  formOk = `已寫入試算表${lastSavedOrderId ? " " + lastSavedOrderId : ""}，實付 ${krw(payable)}。Npay 剩餘 ${krw(npayBalance())}。`;
+  lastOkView = "new-purchase";
   render();
 }
 
@@ -659,37 +569,30 @@ function renderTopup(root) {
   document.getElementById("save-topup").onclick = saveTopup;
 }
 
-function saveTopup() {
+async function saveTopup() {
   lastErrorView = "npay-topup";
   lastOkView = "npay-topup";
   const amount = Number(topupForm.amount);
   if (!topupForm.date) return fail("請填日期");
   if (!(amount > 0)) return fail("儲值金額必須大於 0");
-  const id = nextId("N", ledger.npay);
-  const balance = npayBalance() + amount;
-  ledger.npay.push({
-    id,
-    date: topupForm.date,
-    type: "儲值",
-    credit: amount,
-    debit: 0,
-    balance,
-    topUpCard: topupForm.card,
-  });
-  ledger.cards.push({
-    id: nextId("C", ledger.cards),
-    date: topupForm.date,
-    card: topupForm.card,
-    type: "Npay儲值",
-    amount,
-    relatedId: id,
-    reconciled: false,
-  });
-  ledger.seeded = false;
-  save();
-  topupForm.amount = "";
+  if (!SheetsSync.configured()) return fail("請先到「同步試算表」接上試算表網址");
+  const before = ledger.npay.length;
   formError = "";
-  formOk = `已儲值 ${krw(amount)}，Npay 剩餘 ${krw(balance)}，並記入 ${topupForm.card}。`;
+  formOk = "正在寫入 Google 試算表…";
+  render();
+  const result = await SheetsSync.pushTopup({
+    date: topupForm.date,
+    amount,
+    card: topupForm.card,
+  });
+  const loaded = await refreshFromSheets();
+  if (!result.ok && !result.opaque) return fail(SheetsSync.label(result));
+  if (!loaded.ok) return fail(loaded.error || "已送出，但無法從試算表讀回");
+  if (result.opaque && ledger.npay.length <= before) {
+    return fail("試算表沒有新增列。請確認已部署為「任何人」，且程式已部署新版本。");
+  }
+  topupForm.amount = "";
+  formOk = `已寫入試算表，儲值 ${krw(amount)}，Npay 剩餘 ${krw(npayBalance())}，記入 ${topupForm.card}。`;
   render();
 }
 
@@ -897,12 +800,16 @@ function renderCards(root) {
     };
   });
   root.querySelectorAll("[data-toggle]").forEach((btn) => {
-    btn.onclick = () => {
+    btn.onclick = async () => {
       const row = ledger.cards.find((itemRow) => itemRow.id === btn.dataset.toggle);
       if (!row) return;
-      row.reconciled = !row.reconciled;
-      ledger.seeded = false;
-      save();
+      const result = await SheetsSync.reconcile(row.id, !row.reconciled);
+      if (!result.ok && !result.opaque) {
+        notice = result.error || "對帳狀態寫入失敗";
+        render();
+        return;
+      }
+      await refreshFromSheets();
       render();
     };
   });
@@ -926,7 +833,7 @@ function renderSheets(root) {
         .join("")}
     </div>
     <section class="panel">
-      <h2>將寫入 Google 試算表「${esc(sheetTab)}」</h2>
+      <h2>Google 試算表「${esc(sheetTab)}」目前資料</h2>
       ${tables[sheetTab]}
     </section>
   `;
@@ -1026,4 +933,115 @@ function sheetCards() {
   );
 }
 
-render();
+function renderSync(root) {
+  const url = SheetsSync.getUrl();
+  const secret = SheetsSync.getSecret();
+  const ready = SheetsSync.configured();
+  root.innerHTML = `
+    <div class="grid-2">
+      <section class="panel">
+        <h2>部署步驟（做一次即可）</h2>
+        <ol class="steps">
+          <li>開一份 Google 試算表，建立五個工作表：<strong>商品明細、購買訂單、Npay歷程、銀行卡明細、設定</strong>，第一列貼上對應表頭。</li>
+          <li>試算表選單：<strong>擴充功能 → Apps Script</strong>。</li>
+          <li>刪掉預設內容，貼上專案裡 <code>apps-script/Code.gs</code> 的全部程式，按儲存。</li>
+          <li>在編輯器選 <code>doGet</code>，按「執行」，允許存取這份試算表。</li>
+          <li>右上角 <strong>部署 → 新部署</strong>。類型選「網頁應用程式」。執行身分選「我」，存取對象選「任何人」（即使未登入也可以）。</li>
+          <li>部署後複製網址（會像 <code>https://script.google.com/macros/s/…/exec</code>），貼到右邊欄位並儲存。</li>
+          <li>按「測試連線」。成功後會自動載入試算表，之後在網頁登記就直接寫入，不會存在本機。</li>
+        </ol>
+        <p class="muted">若之後改過程式，必須再「部署 → 管理部署 → 編輯 → 新版本」，網址才會用到新程式。</p>
+      </section>
+      <section class="panel">
+        <h2>本機連線</h2>
+        <p class="muted">試算表是唯一帳本。這個瀏覽器只記住網址，不存放購買或 Npay 資料。</p>
+        <div class="form-grid">
+          <label class="field field-span">Apps Script 網頁應用程式網址
+            <input id="sync-url" value="${esc(url)}" placeholder="https://script.google.com/macros/s/…/exec" />
+          </label>
+          <label class="field field-span">密鑰（選填，須與 Script 屬性 WEBPASS 相同）
+            <input id="sync-secret" value="${esc(secret)}" placeholder="沒有設定可留空" />
+          </label>
+        </div>
+        <p class="error" id="sync-error"></p>
+        <p class="ok-msg" id="sync-ok"></p>
+        <div class="item-actions">
+          <button class="btn btn-primary" type="button" id="sync-save">儲存設定</button>
+          <button class="btn" type="button" id="sync-ping">測試連線</button>
+        </div>
+      </section>
+    </div>
+  `;
+  document.getElementById("sync-save").onclick = () => {
+    SheetsSync.saveConfig(
+      document.getElementById("sync-url").value,
+      document.getElementById("sync-secret").value,
+    );
+    document.getElementById("sync-ok").textContent = "已記住網址，請按測試連線。";
+    document.getElementById("sync-error").textContent = "";
+    notice = "";
+  };
+  document.getElementById("sync-ping").onclick = async () => {
+    SheetsSync.saveConfig(
+      document.getElementById("sync-url").value,
+      document.getElementById("sync-secret").value,
+    );
+    const err = document.getElementById("sync-error");
+    const ok = document.getElementById("sync-ok");
+    err.textContent = "";
+    ok.textContent = "測試中…";
+    const result = await SheetsSync.ping();
+    if (result.ok) {
+      ok.textContent = result.spreadsheet
+        ? `連線成功：${result.spreadsheet}，正在載入資料…`
+        : "連線成功，正在載入試算表…";
+      await boot("dashboard");
+    } else {
+      ok.textContent = "";
+      err.textContent = result.error || "連線失敗。請確認已部署為「任何人」可存取，且執行過 doGet 授權。";
+    }
+  };
+}
+
+async function refreshFromSheets() {
+  if (!SheetsSync.configured()) {
+    ledger = emptyLedger();
+    return { ok: false, skipped: true, error: "尚未設定試算表網址" };
+  }
+  const result = await SheetsSync.load();
+  if (result.ok && result.ledger) {
+    ledger = result.ledger;
+    return result;
+  }
+  return {
+    ok: false,
+    error: result.error || "無法讀取試算表",
+  };
+}
+
+async function boot(nextView) {
+  localStorage.removeItem("kronline-ledger-v1");
+  localStorage.removeItem("kronline-ledger-v2");
+  localStorage.removeItem("kronline-ledger-v3");
+  if (!SheetsSync.configured()) {
+    ledger = emptyLedger();
+    view = "sync";
+    render();
+    return;
+  }
+  notice = "正在從試算表載入…";
+  view = nextView || view || "dashboard";
+  render();
+  const result = await refreshFromSheets();
+  if (!result.ok) {
+    notice = result.error || "無法讀取試算表，請檢查部署設定";
+    view = "sync";
+    render();
+    return;
+  }
+  notice = "";
+  view = nextView || "dashboard";
+  render();
+}
+
+boot();
