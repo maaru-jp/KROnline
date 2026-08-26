@@ -18,7 +18,7 @@ var SHEETS = {
 
 var HEADERS = {
   商品明細: ["明細號", "訂單號", "購買日", "店家", "商品名稱", "單價KRW", "數量", "總金額KRW", "寫入時間"],
-  購買訂單: ["訂單號", "購買日", "店家", "商品合計KRW", "店家折扣KRW", "實付KRW", "Npay", "刷卡KRW", "銀行卡", "備註", "寫入時間"],
+  購買訂單: ["訂單號", "購買日", "店家", "商品合計KRW", "店家折扣KRW", "實付KRW", "Npay", "刷卡KRW", "銀行卡", "備註", "寫入時間", "狀態"],
   Npay歷程: ["單號", "日期", "類型", "儲值KRW", "扣除KRW", "剩餘點數", "儲值銀行卡", "關聯訂單", "寫入時間"],
   銀行卡明細: ["單號", "日期", "銀行卡", "類型", "金額KRW", "關聯", "對帳", "寫入時間"],
   設定: ["類型", "名稱", "備註"],
@@ -59,6 +59,7 @@ function handle_(data) {
     if (action === "purchase") return writePurchase_(data);
     if (action === "topup") return writeTopup_(data);
     if (action === "reconcile") return reconcile_(data);
+    if (action === "cancel") return cancelOrder_(data);
     return json_({ ok: false, error: "未知的 action：" + action });
   } catch (err) {
     return json_({ ok: false, error: String(err.message || err) });
@@ -112,6 +113,7 @@ function loadOrders_() {
       cardAmount: num_(r[7]),
       card: cardName || undefined,
       note: str_(r[9]),
+      status: str_(r[11]) || "正常",
     };
   });
 }
@@ -216,6 +218,7 @@ function writePurchase_(data) {
       order.card || "",
       order.note || "",
       now,
+      "正常",
     ]);
 
     var npayId = "";
@@ -337,6 +340,129 @@ function reconcile_(data) {
   }
 }
 
+function cancelOrder_(data) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    ensure_();
+    var statusCol = ensureOrderStatusCol_();
+    var orderId = str_(data.orderId || data.id);
+    if (!orderId) throw new Error("缺少訂單號");
+    var sh = sheet_(SHEETS.orders);
+    var last = sh.getLastRow();
+    if (last < 2) throw new Error("找不到訂單");
+    var ids = sh.getRange(2, 1, last - 1, 1).getValues();
+    var row = 0;
+    for (var i = 0; i < ids.length; i++) {
+      if (str_(ids[i][0]) === orderId) {
+        row = i + 2;
+        break;
+      }
+    }
+    if (!row) throw new Error("找不到訂單 " + orderId);
+    var status = str_(sh.getRange(row, statusCol).getValue());
+    if (status === "已取消") {
+      throw new Error("這筆訂單已經取消過，不會再補 Npay 或刷退");
+    }
+    var npayUsed = num_(sh.getRange(row, 7).getValue());
+    var cardAmount = num_(sh.getRange(row, 8).getValue());
+    var cardName = str_(sh.getRange(row, 9).getValue());
+    var charge = findOrderCardCharge_(orderId);
+    var refundAmount = cardAmount > 0 ? cardAmount : charge.amount;
+    var refundCard = cardName || charge.card;
+    var now = now_();
+    var cancelDate = Utilities.formatDate(new Date(), "Asia/Taipei", "yyyy-MM-dd");
+    var restored = 0;
+    var balance = npayBalance_();
+    var cardRefundId = "";
+    if (npayUsed > 0) {
+      restored = npayUsed;
+      balance += npayUsed;
+      sheet_(SHEETS.npay).appendRow([
+        nextId_(SHEETS.npay, "N"),
+        cancelDate,
+        "退款回補",
+        npayUsed,
+        0,
+        balance,
+        "",
+        orderId,
+        now,
+      ]);
+    }
+    if (refundAmount > 0) {
+      if (!refundCard) {
+        throw new Error("這筆有刷卡金額但找不到銀行卡，無法記刷退");
+      }
+      cardRefundId = nextId_(SHEETS.cards, "C");
+      sheet_(SHEETS.cards).appendRow([
+        cardRefundId,
+        cancelDate,
+        refundCard,
+        "刷退",
+        -refundAmount,
+        orderId,
+        "未對帳",
+        now,
+      ]);
+    }
+    sh.getRange(row, statusCol).setValue("已取消");
+    return json_({
+      ok: true,
+      action: "cancel",
+      orderId: orderId,
+      npayRestored: restored,
+      npayBalance: balance,
+      cardRefunded: refundAmount > 0 ? refundAmount : 0,
+      card: refundCard || "",
+      cardId: cardRefundId,
+    });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function isCardRefundType_(type) {
+  return type === "刷退" || type === "訂單取消退款";
+}
+
+function findOrderCardCharge_(orderId) {
+  var rows = rows_(SHEETS.cards);
+  var amount = 0;
+  var card = "";
+  for (var i = 0; i < rows.length; i++) {
+    if (str_(rows[i][5]) !== orderId) continue;
+    var type = str_(rows[i][3]);
+    if (isCardRefundType_(type) || type === "Npay儲值") continue;
+    var amt = num_(rows[i][4]);
+    if (amt > 0) {
+      amount += amt;
+      if (!card) card = str_(rows[i][2]);
+    }
+  }
+  return { amount: amount, card: card };
+}
+
+function headerCol_(sh, name) {
+  var lastCol = Math.max(sh.getLastColumn(), 1);
+  var headers = sh.getRange(1, 1, 1, lastCol).getValues()[0];
+  for (var i = 0; i < headers.length; i++) {
+    if (str_(headers[i]) === name) return i + 1;
+  }
+  return 0;
+}
+
+function ensureOrderStatusCol_() {
+  var sh = sheet_(SHEETS.orders);
+  var col = headerCol_(sh, "狀態");
+  if (!col) {
+    col = Math.max(12, sh.getLastColumn() + 1);
+    sh.getRange(1, col).setValue("狀態");
+    sh.getRange(1, col).setFontWeight("bold");
+  }
+  return col;
+}
+
 function npayBalance_() {
   var sh = sheet_(SHEETS.npay);
   var last = sh.getLastRow();
@@ -379,6 +505,7 @@ function ensure_() {
   Object.keys(HEADERS).forEach(function (name) {
     sheet_(name);
   });
+  ensureOrderStatusCol_();
   var settings = sheet_(SHEETS.settings);
   if (settings.getLastRow() < 2) {
     [

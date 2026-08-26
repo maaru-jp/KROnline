@@ -98,8 +98,8 @@ const SheetsSync = {
     });
   },
 
-  async reconcile(id, reconciled) {
-    return this.send({ action: "reconcile", id, reconciled });
+  async cancelOrder(orderId) {
+    return this.send({ action: "cancel", orderId: orderId });
   },
 
   async send(payload) {

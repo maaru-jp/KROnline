@@ -16,12 +16,12 @@ const SUB = {
   dashboard: "Npay 餘額、本月實付、各卡未對帳",
   "new-purchase": "商品、折扣、Npay 與刷哪張卡（富邦／中信）",
   "npay-topup": "記錄何時買 Npay、用哪張卡、儲值後剩餘點數",
-  purchases: "點一筆訂單，看該筆完整商品明細",
-  "npay-ledger": "儲值／扣除時間軸，每筆都留下剩餘點數",
-  cards: "富邦、中信分開對銀行帳單",
+  purchases: "點一筆訂單，看該筆完整商品明細；取消會補回 Npay 並記刷退",
+  "npay-ledger": "儲值、扣除、取消訂單後的退款回補，每筆都留下剩餘點數",
+  cards: "原刷卡與取消後的刷退分開列，對到銀行帳單再勾已對帳",
   sheets: "試算表目前的資料",
   sync: "試算表是唯一帳本；這裡只記住連線網址",
-  "order-detail": "這一筆的全部商品、折扣、Npay 與刷卡",
+  "order-detail": "這一筆的全部商品、折扣、Npay 與刷卡；取消會補回點數並記刷退",
 };
 
 function emptyLedger() {
@@ -63,6 +63,14 @@ function monthKey(date) {
 
 function isOrderId(id) {
   return /^P-\d+/.test(String(id || ""));
+}
+
+function isCardRefund(type) {
+  return type === "刷退" || type === "訂單取消退款";
+}
+
+function cancelActions(row) {
+  return [row.npayUsed ? "補回 Npay" : "", row.cardAmount ? "記刷退" : ""].filter(Boolean);
 }
 
 function openOrder(id, from) {
@@ -190,7 +198,7 @@ function renderTopbar() {
 function renderDashboard(root) {
   const now = today().slice(0, 7);
   const monthPay = ledger.orders
-    .filter((row) => monthKey(row.date) === now)
+    .filter((row) => monthKey(row.date) === now && row.status !== "已取消")
     .reduce((sum, row) => sum + row.npayUsed + row.cardAmount, 0);
   root.innerHTML = `
     <div class="stats">
@@ -243,13 +251,16 @@ function orderTable(orders, withAction) {
       ${orders
         .map((row) => {
           const goods = goodsTotal(row.id);
+          const cancelled = row.status === "已取消";
           const pay = row.npayUsed + row.cardAmount;
-          const payText = [
-            row.npayUsed ? `Npay ${krw(row.npayUsed)}` : "",
-            row.cardAmount ? `${row.card || "刷卡"} ${krw(row.cardAmount)}` : "",
-          ]
-            .filter(Boolean)
-            .join(" + ") || "—";
+          const payText = cancelled
+            ? "已取消"
+            : [
+                row.npayUsed ? `Npay ${krw(row.npayUsed)}` : "",
+                row.cardAmount ? `${row.card || "刷卡"} ${krw(row.cardAmount)}` : "",
+              ]
+                .filter(Boolean)
+                .join(" + ") || "—";
           return `<tr class="row-click" data-order="${esc(row.id)}">
             <td>${orderLink(row.id)}</td>
             <td>${esc(row.date)}</td>
@@ -603,7 +614,7 @@ function renderPurchases(root) {
   }
   root.innerHTML = `<section class="panel">
     <h2>選擇一筆訂單</h2>
-    <p class="muted" style="margin:-6px 0 14px">點訂單編號、整列或「完整明細」，只看該筆全部商品。</p>
+    <p class="muted" style="margin:-6px 0 14px">點訂單編號、整列或「完整明細」，只看該筆全部商品。取消訂單會補回 Npay，有刷卡也會另記刷退。</p>
     ${orderTable(ledger.orders.slice().reverse(), true)}
   </section>`;
   bindOrderLinks(root);
@@ -630,11 +641,16 @@ function renderOrderDetail(root) {
   root.innerHTML = `
     <div class="item-actions" style="margin-bottom:16px">
       <button class="btn" type="button" id="back-detail">返回${esc(backLabel)}</button>
+      ${
+        row.status === "已取消"
+          ? ""
+          : `<button class="btn btn-danger" type="button" id="cancel-order">取消訂單${cancelActions(row).length ? "並" + cancelActions(row).join("／") : ""}</button>`
+      }
     </div>
     <div class="grid-2">
       <section class="panel">
-        <h2>${esc(row.id)}　${esc(row.shop)}</h2>
-        <p class="muted">購買日 ${esc(row.date)}${row.note ? `　備註 ${esc(row.note)}` : ""}</p>
+        <h2>${esc(row.id)}　${esc(row.shop)}${row.status === "已取消" ? "　已取消" : ""}</h2>
+        <p class="muted">購買日 ${esc(row.date)}${row.note ? `　備註 ${esc(row.note)}` : ""}${row.status === "已取消" ? "　已取消：Npay 退款回補與刷退都會另開新單，舊列保留方便對帳" : ""}</p>
         <div class="table-wrap">
           <table>
             <thead>
@@ -683,13 +699,14 @@ function renderOrderDetail(root) {
           npayRows.length
             ? `<h2 style="margin-top:18px">Npay 歷程</h2>
           <div class="table-wrap"><table>
-            <thead><tr><th>日期</th><th>類型</th><th class="num">扣除</th><th class="num">剩餘點數</th></tr></thead>
+            <thead><tr><th>日期</th><th>類型</th><th class="num">儲值／補回</th><th class="num">扣除</th><th class="num">剩餘點數</th></tr></thead>
             <tbody>${npayRows
               .map(
                 (entry) => `<tr>
               <td>${esc(entry.date)}</td>
               <td>${esc(entry.type)}</td>
-              <td class="num">${krw(entry.debit)}</td>
+              <td class="num">${entry.credit ? krw(entry.credit) : "—"}</td>
+              <td class="num">${entry.debit ? krw(entry.debit) : "—"}</td>
               <td class="num">${krw(entry.balance)}</td>
             </tr>`,
               )
@@ -701,14 +718,15 @@ function renderOrderDetail(root) {
           cardRows.length
             ? `<h2 style="margin-top:18px">銀行卡</h2>
           <div class="table-wrap"><table>
-            <thead><tr><th>日期</th><th>卡</th><th>類型</th><th class="num">金額</th></tr></thead>
+            <thead><tr><th>日期</th><th>卡</th><th>類型</th><th class="num">金額</th><th>對帳</th></tr></thead>
             <tbody>${cardRows
               .map(
                 (entry) => `<tr>
               <td>${esc(entry.date)}</td>
               <td>${esc(entry.card)}</td>
               <td>${esc(entry.type)}</td>
-              <td class="num">${krw(entry.amount)}</td>
+              <td class="num ${entry.amount < 0 ? "credit" : ""}">${krw(entry.amount)}</td>
+              <td>${entry.reconciled ? "已對帳" : "未對帳"}</td>
             </tr>`,
               )
               .join("")}</tbody>
@@ -722,6 +740,63 @@ function renderOrderDetail(root) {
     view = detailFrom && detailFrom !== "order-detail" ? detailFrom : "purchases";
     render();
   };
+  const cancelBtn = document.getElementById("cancel-order");
+  if (cancelBtn) {
+    cancelBtn.onclick = async () => {
+      const lines = [`確定取消 ${row.id}？`];
+      if (row.npayUsed) {
+        lines.push(`Npay 將補回 ${krw(row.npayUsed)}。舊的「消費扣除」列會保留，另外新增「退款回補」。`);
+      }
+      if (row.cardAmount) {
+        lines.push(`${row.card || "信用卡"} 將新增一筆刷退 ${krw(row.cardAmount)}，方便對銀行帳單。原刷卡列會保留。`);
+      }
+      if (!row.npayUsed && !row.cardAmount) {
+        lines.push("這筆沒有扣 Npay 也沒有刷卡。");
+      }
+      if (!confirm(lines.join("\n"))) {
+        return;
+      }
+      notice = "正在取消訂單並寫入退款／刷退…";
+      render();
+      const result = await SheetsSync.cancelOrder(row.id);
+      const loaded = await refreshFromSheets();
+      if (!result.ok && !result.opaque) {
+        notice = result.error || "取消失敗";
+        render();
+        return;
+      }
+      if (!loaded.ok) {
+        notice = loaded.error || "已送出取消，但無法從試算表讀回";
+        render();
+        return;
+      }
+      const updated = ledger.orders.find((item) => item.id === row.id);
+      if (!updated || updated.status !== "已取消") {
+        notice =
+          result.error ||
+          "取消失敗。請把 Code.gs 貼上最新內容後，在 Apps Script 部署新版本，再取消一次。";
+        render();
+        return;
+      }
+      const restored =
+        Number(result.npayRestored) ||
+        ledger.npay
+          .filter((entry) => entry.relatedOrderId === row.id && entry.type === "退款回補")
+          .reduce((sum, entry) => sum + (entry.credit || 0), 0);
+      const cardRefunded =
+        Number(result.cardRefunded) ||
+        ledger.cards
+          .filter((entry) => entry.relatedId === row.id && isCardRefund(entry.type))
+          .reduce((sum, entry) => sum + Math.abs(entry.amount || 0), 0);
+      const parts = [`已取消 ${row.id}`];
+      if (restored) parts.push(`Npay 補回 ${krw(restored)}，目前剩餘 ${krw(npayBalance())}`);
+      if (cardRefunded) {
+        parts.push(`${result.card || row.card || "信用卡"} 已記刷退 ${krw(cardRefunded)}`);
+      }
+      notice = `${parts[0]}${parts.length > 1 ? "，" + parts.slice(1).join("；") : ""}。`;
+      render();
+    };
+  }
 }
 
 function renderNpay(root) {
@@ -730,7 +805,7 @@ function renderNpay(root) {
     return;
   }
   root.innerHTML = `<section class="panel"><div class="table-wrap"><table>
-    <thead><tr><th>單號</th><th>日期</th><th>類型</th><th class="num">儲值</th><th class="num">扣除</th><th class="num">剩餘點數</th><th>儲值銀行卡</th><th>關聯訂單</th></tr></thead>
+    <thead><tr><th>單號</th><th>日期</th><th>類型</th><th class="num">儲值／補回</th><th class="num">扣除</th><th class="num">剩餘點數</th><th>儲值銀行卡</th><th>關聯訂單</th></tr></thead>
     <tbody>
       ${ledger.npay
         .slice()
@@ -744,17 +819,19 @@ function renderNpay(root) {
         <td class="num">${row.debit ? krw(row.debit) : "—"}</td>
         <td class="num">${krw(row.balance)}</td>
         <td>${esc(row.topUpCard || "—")}</td>
-        <td>${esc(row.relatedOrderId || "—")}</td>
+        <td>${row.relatedOrderId ? orderLink(row.relatedOrderId) : "—"}</td>
       </tr>`,
         )
         .join("")}
     </tbody>
   </table></div></section>`;
+  bindOrderLinks(root);
 }
 
 function renderCards(root) {
   const rows = ledger.cards.filter((row) => row.card === cardTab);
-  const open = rows.filter((row) => !row.reconciled).reduce((sum, row) => sum + row.amount, 0);
+  const openRows = rows.filter((row) => !row.reconciled);
+  const open = openRows.reduce((sum, row) => sum + row.amount, 0);
   const all = rows.reduce((sum, row) => sum + row.amount, 0);
   root.innerHTML = `
     <div class="tabs">
@@ -765,7 +842,8 @@ function renderCards(root) {
     </div>
     <div class="stats">
       <article class="stat"><div class="label">${esc(cardTab)} 合計</div><div class="value">${krw(all)}</div></article>
-      <article class="stat"><div class="label">未對帳</div><div class="value">${krw(open)}</div></article>
+      <article class="stat"><div class="label">未對帳淨額</div><div class="value">${krw(open)}</div></article>
+      <article class="stat"><div class="label">未對帳筆數</div><div class="value">${openRows.length}</div></article>
     </div>
     <section class="panel">
       ${
@@ -781,18 +859,19 @@ function renderCards(root) {
             <td>${esc(row.id)}</td>
             <td>${esc(row.date)}</td>
             <td>${esc(row.type)}</td>
-            <td class="num">${krw(row.amount)}</td>
-            <td>${esc(row.relatedId)}</td>
+            <td class="num ${row.amount < 0 ? "credit" : ""}">${krw(row.amount)}</td>
+            <td>${isOrderId(row.relatedId) ? orderLink(row.relatedId) : esc(row.relatedId || "—")}</td>
             <td><button class="btn ${row.reconciled ? "" : "btn-primary"}" data-toggle="${esc(row.id)}" type="button">${row.reconciled ? "已對帳" : "未對帳"}</button></td>
           </tr>`,
             )
             .join("")}
         </tbody>
       </table></div>`
-          : `<p class="empty">${esc(cardTab)} 尚無刷卡紀錄</p>`
+          : `<p class="empty">${esc(cardTab)} 尚無刷卡／刷退紀錄</p>`
       }
     </section>
   `;
+  bindOrderLinks(root);
   root.querySelectorAll("[data-card]").forEach((btn) => {
     btn.onclick = () => {
       cardTab = btn.dataset.card;
@@ -884,7 +963,7 @@ function sheetItems() {
 
 function sheetOrders() {
   return simpleTable(
-    ["訂單號", "購買日", "店家", "商品合計", "店家折扣", "實付", "Npay", "刷卡", "銀行卡"],
+    ["訂單號", "購買日", "店家", "商品合計", "店家折扣", "實付", "Npay", "刷卡", "銀行卡", "狀態"],
     ledger.orders.map((row) => [
       row.id,
       row.date,
@@ -895,6 +974,7 @@ function sheetOrders() {
       krw(row.npayUsed),
       krw(row.cardAmount),
       row.card || "—",
+      row.status || "正常",
     ]),
     [3, 4, 5, 6, 7],
   );
@@ -902,7 +982,7 @@ function sheetOrders() {
 
 function sheetNpay() {
   return simpleTable(
-    ["單號", "日期", "類型", "儲值", "扣除", "剩餘點數", "儲值銀行卡", "關聯訂單"],
+    ["單號", "日期", "類型", "儲值／補回", "扣除", "剩餘點數", "儲值銀行卡", "關聯訂單"],
     ledger.npay.map((row) => [
       row.id,
       row.date,
