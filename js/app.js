@@ -26,7 +26,7 @@ const NAV = [
 
 const SUB = {
   dashboard: "Npay 餘額、本月實付、各卡未對帳台幣",
-  "new-purchase": "店家可自行輸入；實付＝商品合計 − 折扣 ＋ 運費。兩種記法：扣 Npay，或直接刷卡",
+  "new-purchase": "店家可自行輸入；實付＝商品合計 − 優惠劵折扣 ＋ 運費。兩種記法：扣 Npay，或直接刷卡",
   "npay-topup": "選卡並手動填台幣後，會自動寫入試算表",
   purchases: "點一筆訂單，看該筆完整商品明細；取消會補回 Npay 並記刷退",
   "npay-ledger": "儲值、扣除、取消訂單後的退款回補，每筆都留下剩餘點數",
@@ -365,7 +365,7 @@ function renderPurchase(root) {
           <label class="field">店家（可自行輸入）
             <input list="shops" id="p-shop" value="${esc(purchaseForm.shop)}" placeholder="自行輸入店家名稱，也可從建議選" autocomplete="off" />
           </label>
-          <label class="field">店家折扣（韓幣）
+          <label class="field">優惠劵折扣（韓幣）
             <input type="number" min="0" id="p-discount" value="${esc(purchaseForm.discount)}" />
           </label>
           <label class="field">配送運費（韓幣）
@@ -564,7 +564,7 @@ function paintPurchaseTotals() {
   const cardMode = purchaseForm.payMethod === "card";
   box.innerHTML = `
     <div><span>商品合計</span><span>${krw(goods)}</span></div>
-    <div><span>店家折扣</span><span>− ${krw(discount)}</span></div>
+    <div><span>優惠劵折扣</span><span>− ${krw(discount)}</span></div>
     <div><span>配送運費</span><span>${krw(Number(purchaseForm.shipping || 0))}</span></div>
     <div class="pay"><span>實付韓幣</span><span>${krw(payable)}</span></div>
     ${
@@ -651,7 +651,7 @@ async function savePurchase(opts = {}) {
   const goods = items.reduce((sum, row) => sum + row.unitPrice * row.quantity, 0);
   const discount = Number(purchaseForm.discount || 0);
   const shipping = Number(purchaseForm.shipping || 0);
-  if (discount < 0 || discount > goods) return skip("店家折扣需介於 0 與商品合計之間");
+  if (discount < 0 || discount > goods) return skip("優惠劵折扣需介於 0 與商品合計之間");
   if (shipping < 0) return skip("運費不能是負數");
   const payable = goods - discount + shipping;
   const cardMode = purchaseForm.payMethod === "card";
