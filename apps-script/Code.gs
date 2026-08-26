@@ -18,7 +18,7 @@ var SHEETS = {
 
 var HEADERS = {
   商品明細: ["明細號", "訂單號", "購買日", "店家", "商品名稱", "單價KRW", "數量", "總金額KRW", "寫入時間"],
-  購買訂單: ["訂單號", "購買日", "店家", "商品合計KRW", "店家折扣KRW", "實付KRW", "Npay", "刷卡KRW", "銀行卡", "備註", "寫入時間", "狀態"],
+  購買訂單: ["訂單號", "購買日", "店家", "商品合計KRW", "店家折扣KRW", "實付KRW", "Npay", "刷卡KRW", "銀行卡", "備註", "寫入時間", "狀態", "運費KRW"],
   Npay歷程: ["單號", "日期", "類型", "儲值KRW", "扣除KRW", "剩餘點數", "儲值銀行卡", "關聯訂單", "寫入時間"],
   銀行卡明細: ["單號", "日期", "銀行卡", "類型", "金額KRW", "關聯", "對帳", "寫入時間", "匯率", "金額TWD"],
   設定: ["類型", "名稱", "備註"],
@@ -92,7 +92,7 @@ function ping_() {
   return json_({
     ok: true,
     action: "ping",
-    version: "write-v2",
+    version: "write-v3",
     spreadsheet: ss.getName(),
     url: ss.getUrl(),
     sheets: sheets,
@@ -107,7 +107,7 @@ function selftest_() {
   return json_({
     ok: true,
     action: "selftest",
-    version: "write-v2",
+    version: "write-v3",
     spreadsheet: ss.getName(),
     url: ss.getUrl(),
     wrote: "設定",
@@ -121,7 +121,7 @@ function loadAll_() {
   return json_({
     ok: true,
     action: "load",
-    version: "write-v2",
+    version: "write-v3",
     spreadsheet: ss.getName(),
     url: ss.getUrl(),
     items: loadItems_(),
@@ -159,6 +159,7 @@ function loadOrders_() {
       card: cardName || undefined,
       note: str_(r[9]),
       status: str_(r[11]) || "正常",
+      shipping: num_(r[12]),
     };
   });
 }
@@ -217,10 +218,12 @@ function writePurchase_(data) {
     });
 
     var discount = Number(order.storeDiscount || 0);
+    var shipping = Number(order.shipping || 0);
     var npayUsed = Number(order.npayUsed || 0);
     var cardAmount = Number(order.cardAmount || 0);
-    var payable = goods - discount;
+    var payable = goods - discount + shipping;
     if (discount < 0 || discount > goods) throw new Error("店家折扣不正確");
+    if (shipping < 0) throw new Error("運費不能是負數");
     if (npayUsed + cardAmount !== payable) {
       throw new Error("實付必須等於 Npay + 刷卡");
     }
@@ -270,6 +273,7 @@ function writePurchase_(data) {
       order.note || "",
       now,
       "正常",
+      shipping,
     ]);
 
     var npayId = "";
@@ -616,6 +620,7 @@ function ensure_() {
   });
   ensureOrderStatusCol_();
   ensureSheetHeaders_(SHEETS.cards);
+  ensureSheetHeaders_(SHEETS.orders);
   var settings = sheet_(SHEETS.settings);
   if (settings.getLastRow() < 2) {
     [
