@@ -26,7 +26,7 @@ const NAV = [
 
 const SUB = {
   dashboard: "Npay 餘額、本月實付、各卡未對帳台幣",
-  "new-purchase": "店家可自行輸入；實付＝商品合計 − 優惠劵折扣 ＋ 運費。兩種記法：扣 Npay，或直接刷卡",
+  "new-purchase": "實付＝產品價格 ＋ 運費 ＋ 刷卡手續費 − 優惠劵折扣。產品價格可改成訂單底部數字",
   "npay-topup": "選卡並手動填台幣後，會自動寫入試算表",
   purchases: "點一筆訂單，看該筆完整商品明細；取消會補回 Npay 並記刷退",
   "npay-ledger": "儲值、扣除、取消訂單後的退款回補，每筆都留下剩餘點數",
@@ -81,14 +81,24 @@ function today() {
   return new Date().toISOString().slice(0, 10);
 }
 
+function parseKrw(value) {
+  const n = Number(String(value ?? "").replace(/,/g, "").replace(/[^\d.-]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+}
+
 function itemTotal(row) {
-  return Number(row.unitPrice || 0) * Number(row.quantity || 0);
+  return parseKrw(row.unitPrice) * Number(row.quantity || 0);
 }
 
 function goodsTotal(orderId) {
   return ledger.items
     .filter((row) => row.orderId === orderId)
     .reduce((sum, row) => sum + itemTotal(row), 0);
+}
+
+function orderProductPrice(row) {
+  const stored = parseKrw(row.productPrice);
+  return stored > 0 ? stored : goodsTotal(row.id);
 }
 
 function npayBalance() {
@@ -154,6 +164,9 @@ function blankPurchase() {
     shop: "",
     discount: "0",
     shipping: "0",
+    cardFee: "0",
+    productPrice: "",
+    productPriceManual: false,
     payMethod: "npay",
     npay: "0",
     cardAmount: "0",
@@ -235,7 +248,7 @@ function rememberSheetInfo(result) {
 
 function sheetInfoHtml() {
   if (!sheetInfo?.spreadsheet) return "";
-  const old = sheetInfo.version !== "write-v3";
+  const old = sheetInfo.version !== "write-v4";
   const counts = (sheetInfo.sheets || [])
     .map((row) => `${esc(row.name)} ${row.rows} 列`)
     .join("、");
@@ -317,11 +330,10 @@ function renderDashboard(root) {
 function orderTable(orders, withAction) {
   if (!orders.length) return `<p class="empty">尚無購買紀錄</p>`;
   return `<div class="table-wrap"><table>
-    <thead><tr><th>訂單</th><th>日期</th><th>店家</th><th class="num">商品合計</th><th class="num">折扣</th><th class="num">運費</th><th class="num">實付</th><th>付款</th>${withAction ? "<th></th>" : ""}</tr></thead>
+    <thead><tr><th>訂單</th><th>日期</th><th>店家</th><th class="num">產品價格</th><th class="num">折扣</th><th class="num">運費</th><th class="num">手續費</th><th class="num">實付</th><th>付款</th>${withAction ? "<th></th>" : ""}</tr></thead>
     <tbody>
       ${orders
         .map((row) => {
-          const goods = goodsTotal(row.id);
           const cancelled = row.status === "已取消";
           const pay = row.npayUsed + row.cardAmount;
           const payText = cancelled
@@ -338,9 +350,10 @@ function orderTable(orders, withAction) {
             <td>${orderLink(row.id)}</td>
             <td>${esc(row.date)}</td>
             <td>${esc(row.shop)}</td>
-            <td class="num">${krw(goods)}</td>
+            <td class="num">${krw(orderProductPrice(row))}</td>
             <td class="num">${krw(row.storeDiscount)}</td>
             <td class="num">${krw(row.shipping || 0)}</td>
+            <td class="num">${krw(row.cardFee || 0)}</td>
             <td class="num">${krw(pay)}</td>
             <td>${esc(payText || "—")}</td>
             ${withAction ? `<td><button class="btn" type="button" data-order="${esc(row.id)}">完整明細</button></td>` : ""}
@@ -366,16 +379,23 @@ function renderPurchase(root) {
             <input list="shops" id="p-shop" value="${esc(purchaseForm.shop)}" placeholder="自行輸入店家名稱，也可從建議選" autocomplete="off" />
           </label>
           <label class="field">優惠劵折扣（韓幣）
-            <input type="number" min="0" id="p-discount" value="${esc(purchaseForm.discount)}" />
+            <input id="p-discount" inputmode="decimal" value="${esc(purchaseForm.discount)}" placeholder="例如 36140" />
           </label>
           <label class="field">配送運費（韓幣）
-            <input type="number" min="0" id="p-shipping" value="${esc(purchaseForm.shipping)}" />
+            <input id="p-shipping" inputmode="decimal" value="${esc(purchaseForm.shipping)}" placeholder="例如 5000" />
+          </label>
+          <label class="field">刷卡手續費（韓幣）
+            <input id="p-card-fee" inputmode="decimal" value="${esc(purchaseForm.cardFee)}" placeholder="沒有就填 0" />
+          </label>
+          <label class="field">產品價格（韓幣）
+            <input id="p-goods" inputmode="decimal" value="${esc(purchaseForm.productPriceManual ? purchaseForm.productPrice : String(calcGoods() || ""))}" placeholder="訂單底部的產品價格" />
           </label>
           <label class="field">備註
             <input id="p-note" value="${esc(purchaseForm.note)}" />
           </label>
         </div>
         <datalist id="shops">${shopSuggestions().map((s) => `<option value="${esc(s)}"></option>`).join("")}</datalist>
+        <p class="muted" style="margin:10px 0 0">單價可直接貼 5,390。產品價格預設等於單價×數量；若訂單底部有「產品價格」，請改填那個數字。</p>
         <h2 style="margin-top:18px">商品明細</h2>
         <div class="table-wrap">
           <table>
@@ -448,6 +468,21 @@ function renderPurchase(root) {
     paintPurchaseTotals();
     maybeQueuePurchaseWrite();
   };
+  document.getElementById("p-card-fee").oninput = (e) => {
+    purchaseForm.cardFee = e.target.value;
+    applyPayMethod();
+    syncPayInputs();
+    paintPurchaseTotals();
+    maybeQueuePurchaseWrite();
+  };
+  document.getElementById("p-goods").oninput = (e) => {
+    purchaseForm.productPrice = e.target.value;
+    purchaseForm.productPriceManual = true;
+    applyPayMethod();
+    syncPayInputs();
+    paintPurchaseTotals();
+    maybeQueuePurchaseWrite();
+  };
   document.getElementById("pay-npay").onclick = () => {
     syncItemInputs();
     purchaseForm.payMethod = "npay";
@@ -495,6 +530,7 @@ function renderPurchase(root) {
     purchaseForm.items.push({ name: "", unitPrice: "", quantity: "1" });
     paintItemRows();
     applyPayMethod();
+    syncProductPriceField();
     syncPayInputs();
     paintPurchaseTotals();
   };
@@ -509,10 +545,10 @@ function paintItemRows() {
   const tbody = document.getElementById("item-rows");
   tbody.innerHTML = purchaseForm.items
     .map((row, i) => {
-      const total = Number(row.unitPrice || 0) * Number(row.quantity || 0);
+      const total = itemTotal(row);
       return `<tr>
         <td><input data-i="${i}" data-k="name" value="${esc(row.name)}" placeholder="商品名稱" /></td>
-        <td><input data-i="${i}" data-k="unitPrice" type="number" min="0" value="${esc(row.unitPrice)}" /></td>
+        <td><input data-i="${i}" data-k="unitPrice" inputmode="decimal" value="${esc(row.unitPrice)}" placeholder="5390" /></td>
         <td><input data-i="${i}" data-k="quantity" type="number" min="1" value="${esc(row.quantity)}" /></td>
         <td class="num" data-total="${i}">${krw(total)}</td>
         <td><button class="row-del" data-del="${i}" type="button">刪</button></td>
@@ -524,8 +560,9 @@ function paintItemRows() {
       const i = Number(el.dataset.i);
       purchaseForm.items[i][el.dataset.k] = el.value;
       applyPayMethod();
-      const total = Number(purchaseForm.items[i].unitPrice || 0) * Number(purchaseForm.items[i].quantity || 0);
+      const total = itemTotal(purchaseForm.items[i]);
       tbody.querySelector(`[data-total="${i}"]`).textContent = krw(total);
+      syncProductPriceField();
       syncPayInputs();
       paintPurchaseTotals();
       maybeQueuePurchaseWrite();
@@ -538,6 +575,7 @@ function paintItemRows() {
       purchaseForm.items.splice(Number(el.dataset.del), 1);
       applyPayMethod();
       paintItemRows();
+      syncProductPriceField();
       syncPayInputs();
       paintPurchaseTotals();
       maybeQueuePurchaseWrite();
@@ -553,24 +591,36 @@ function syncItemInputs() {
 }
 
 function paintPurchaseTotals() {
-  const goods = calcGoods();
-  const discount = Number(purchaseForm.discount || 0);
+  const itemSum = calcGoods();
+  const productPrice = calcProductPrice();
+  const discount = parseKrw(purchaseForm.discount);
+  const shipping = parseKrw(purchaseForm.shipping);
+  const cardFee = parseKrw(purchaseForm.cardFee);
   const payable = calcPayable();
-  const npayAmt = Number(purchaseForm.npay || 0);
-  const cardAmt = Number(purchaseForm.cardAmount || 0);
+  const npayAmt = parseKrw(purchaseForm.npay);
+  const cardAmt = parseKrw(purchaseForm.cardAmount);
   const remain = npayBalance() - npayAmt;
   const box = document.getElementById("p-totals");
   if (!box) return;
   const cardMode = purchaseForm.payMethod === "card";
+  const mismatch = itemSum !== productPrice;
   box.innerHTML = `
-    <div><span>商品合計</span><span>${krw(goods)}</span></div>
+    ${mismatch ? `<div><span>明細單價×數量</span><span>${krw(itemSum)}</span></div>` : ""}
+    <div><span>產品價格</span><span>${krw(productPrice)}</span></div>
+    <div><span>配送運費</span><span>＋ ${krw(shipping)}</span></div>
+    <div><span>刷卡手續費</span><span>＋ ${krw(cardFee)}</span></div>
     <div><span>優惠劵折扣</span><span>− ${krw(discount)}</span></div>
-    <div><span>配送運費</span><span>${krw(Number(purchaseForm.shipping || 0))}</span></div>
     <div class="pay"><span>實付韓幣</span><span>${krw(payable)}</span></div>
+    <p class="muted" style="margin:0">${krw(productPrice)} ＋ ${krw(shipping)} ＋ ${krw(cardFee)} − ${krw(discount)} ＝ ${krw(payable)}</p>
+    ${
+      mismatch
+        ? `<p class="muted" style="margin:0">明細合計與產品價格不同。請把訂單底部的「產品價格」填在左欄；畫面上的單價若已是折後價，加總就不會等於產品價格。</p>`
+        : ""
+    }
     ${
       cardMode
         ? `<div><span>刷卡 ${esc(purchaseForm.card || "卡")}</span><span>${krw(cardAmt)}${cardAmt === payable ? "" : "（需等於實付）"}</span></div>
-    <div><span>台幣（手動）</span><span>${purchaseForm.cardTwd ? twd(Number(purchaseForm.cardTwd)) : "尚未填"}</span></div>`
+    <div><span>台幣（手動）</span><span>${purchaseForm.cardTwd ? twd(parseKrw(purchaseForm.cardTwd)) : "尚未填"}</span></div>`
         : `<div><span>Npay 扣除</span><span>${krw(npayAmt)}</span></div>
     <div><span>目前 Npay 餘額</span><span>${krw(npayBalance())}</span></div>
     <div><span>送出後 Npay</span><span class="${remain < 0 ? "debit" : ""}">${remain < 0 ? "餘額不足" : krw(remain)}</span></div>`
@@ -579,14 +629,29 @@ function paintPurchaseTotals() {
 }
 
 function calcGoods() {
-  return purchaseForm.items.reduce(
-    (sum, row) => sum + Number(row.unitPrice || 0) * Number(row.quantity || 0),
-    0,
-  );
+  return purchaseForm.items.reduce((sum, row) => sum + itemTotal(row), 0);
+}
+
+function calcProductPrice() {
+  if (purchaseForm.productPriceManual) return parseKrw(purchaseForm.productPrice);
+  return calcGoods();
 }
 
 function calcPayable() {
-  return calcGoods() - Number(purchaseForm.discount || 0) + Number(purchaseForm.shipping || 0);
+  return (
+    calcProductPrice() -
+    parseKrw(purchaseForm.discount) +
+    parseKrw(purchaseForm.shipping) +
+    parseKrw(purchaseForm.cardFee)
+  );
+}
+
+function syncProductPriceField() {
+  if (purchaseForm.productPriceManual) return;
+  const el = document.getElementById("p-goods");
+  const next = calcGoods() ? String(calcGoods()) : "";
+  purchaseForm.productPrice = next;
+  if (el) el.value = next;
 }
 
 function applyPayMethod() {
@@ -622,6 +687,14 @@ async function savePurchase(opts = {}) {
     purchaseForm.shop = document.getElementById("p-shop").value;
     purchaseForm.discount = document.getElementById("p-discount").value;
     purchaseForm.shipping = document.getElementById("p-shipping").value;
+    purchaseForm.cardFee = document.getElementById("p-card-fee").value;
+    const goodsEl = document.getElementById("p-goods");
+    if (goodsEl) {
+      purchaseForm.productPrice = goodsEl.value;
+      if (String(goodsEl.value || "").trim() && parseKrw(goodsEl.value) !== calcGoods()) {
+        purchaseForm.productPriceManual = true;
+      }
+    }
     purchaseForm.note = document.getElementById("p-note").value;
     const cardAmtEl = document.getElementById("p-card-amt");
     const cardEl = document.getElementById("p-card");
@@ -633,7 +706,7 @@ async function savePurchase(opts = {}) {
   const items = purchaseForm.items
     .map((row) => ({
       name: row.name.trim(),
-      unitPrice: Number(row.unitPrice),
+      unitPrice: parseKrw(row.unitPrice),
       quantity: Number(row.quantity),
     }))
     .filter((row) => row.name || row.unitPrice || row.quantity !== 1);
@@ -648,21 +721,25 @@ async function savePurchase(opts = {}) {
     if (!Number.isInteger(row.quantity) || row.quantity < 1)
       return skip("數量必須是正整數");
   }
-  const goods = items.reduce((sum, row) => sum + row.unitPrice * row.quantity, 0);
-  const discount = Number(purchaseForm.discount || 0);
-  const shipping = Number(purchaseForm.shipping || 0);
-  if (discount < 0 || discount > goods) return skip("優惠劵折扣需介於 0 與商品合計之間");
+  const itemSum = items.reduce((sum, row) => sum + row.unitPrice * row.quantity, 0);
+  const productPrice = calcProductPrice() || itemSum;
+  const discount = parseKrw(purchaseForm.discount);
+  const shipping = parseKrw(purchaseForm.shipping);
+  const cardFee = parseKrw(purchaseForm.cardFee);
+  if (!(productPrice > 0)) return skip("請填產品價格，或至少登一件有單價的商品");
+  if (discount < 0 || discount > productPrice) return skip("優惠劵折扣需介於 0 與產品價格之間");
   if (shipping < 0) return skip("運費不能是負數");
-  const payable = goods - discount + shipping;
+  if (cardFee < 0) return skip("刷卡手續費不能是負數");
+  const payable = productPrice - discount + shipping + cardFee;
   const cardMode = purchaseForm.payMethod === "card";
   const npayUsed = cardMode ? 0 : payable;
-  const cardAmount = cardMode ? Number(purchaseForm.cardAmount || payable) : 0;
+  const cardAmount = cardMode ? parseKrw(purchaseForm.cardAmount || payable) : 0;
   if (npayUsed + cardAmount !== payable)
     return skip(`實付 ${krw(payable)} 必須等於 ${cardMode ? "刷卡韓幣" : "Npay"}`);
   if (npayUsed > npayBalance())
     return fail(`Npay 餘額不足，目前 ${krw(npayBalance())}`);
   if (cardMode && !purchaseForm.card) return skip("刷卡時請選擇富邦或中信");
-  const cardTwdAmt = Number(purchaseForm.cardTwd || 0);
+  const cardTwdAmt = parseKrw(purchaseForm.cardTwd);
   if (cardMode && !(cardTwdAmt > 0)) return skip("刷卡請手動填台幣金額");
   if (auto && cardMode && !(cardAmount > 0 && cardTwdAmt > 0)) return;
   if (auto && !cardMode && !(npayUsed > 0)) return;
@@ -681,6 +758,8 @@ async function savePurchase(opts = {}) {
         shop: purchaseForm.shop.trim(),
         storeDiscount: discount,
         shipping,
+        cardFee,
+        productPrice,
         npayUsed,
         cardAmount,
         card: cardAmount > 0 ? purchaseForm.card : "",
@@ -721,8 +800,8 @@ function fail(message) {
 
 function maybeQueuePurchaseWrite() {
   if (purchaseForm.payMethod === "card") {
-    if (!(Number(purchaseForm.cardAmount) > 0) || !(Number(purchaseForm.cardTwd) > 0)) return;
-  } else if (!(Number(purchaseForm.npay) > 0)) {
+    if (!(parseKrw(purchaseForm.cardAmount) > 0) || !(parseKrw(purchaseForm.cardTwd) > 0)) return;
+  } else if (!(parseKrw(purchaseForm.npay) > 0)) {
     return;
   }
   clearTimeout(purchaseWriteTimer);
@@ -874,6 +953,7 @@ function renderOrderDetail(root) {
   const npayRows = ledger.npay.filter((entry) => entry.relatedOrderId === row.id);
   const cardRows = ledger.cards.filter((entry) => entry.relatedId === row.id);
   const goods = goodsTotal(row.id);
+  const productPrice = orderProductPrice(row);
   const payable = row.npayUsed + row.cardAmount;
   root.innerHTML = `
     <div class="item-actions" style="margin-bottom:16px">
@@ -926,9 +1006,11 @@ function renderOrderDetail(root) {
       <section class="panel">
         <h2>這一筆怎麼付</h2>
         <div class="totals">
-          <div><span>商品合計</span><span>${krw(goods)}</span></div>
-          <div><span>店家折扣</span><span>− ${krw(row.storeDiscount)}</span></div>
-          <div><span>配送運費</span><span>${krw(row.shipping || 0)}</span></div>
+          ${goods !== productPrice ? `<div><span>明細單價×數量</span><span>${krw(goods)}</span></div>` : ""}
+          <div><span>產品價格</span><span>${krw(productPrice)}</span></div>
+          <div><span>配送運費</span><span>＋ ${krw(row.shipping || 0)}</span></div>
+          <div><span>刷卡手續費</span><span>＋ ${krw(row.cardFee || 0)}</span></div>
+          <div><span>優惠劵折扣</span><span>− ${krw(row.storeDiscount)}</span></div>
           <div class="pay"><span>實付</span><span>${krw(payable)}</span></div>
           <div><span>Npay</span><span>${krw(row.npayUsed)}</span></div>
           <div><span>${esc(row.card || "刷卡")}</span><span>${krw(row.cardAmount)}${cardTwdForOrder(row.id) ? `／${twd(cardTwdForOrder(row.id))}` : ""}</span></div>
@@ -1215,21 +1297,22 @@ function sheetItems() {
 
 function sheetOrders() {
   return simpleTable(
-    ["訂單號", "購買日", "店家", "商品合計", "店家折扣", "運費", "實付", "Npay", "刷卡", "銀行卡", "狀態"],
+    ["訂單號", "購買日", "店家", "產品價格", "優惠劵折扣", "運費", "手續費", "實付", "Npay", "刷卡", "銀行卡", "狀態"],
     ledger.orders.map((row) => [
       row.id,
       row.date,
       row.shop,
-      krw(goodsTotal(row.id)),
+      krw(orderProductPrice(row)),
       krw(row.storeDiscount),
       krw(row.shipping || 0),
+      krw(row.cardFee || 0),
       krw(row.npayUsed + row.cardAmount),
       krw(row.npayUsed),
       krw(row.cardAmount),
       row.card || "—",
       row.status || "正常",
     ]),
-    [3, 4, 5, 6, 7, 8],
+    [3, 4, 5, 6, 7, 8, 9],
   );
 }
 
@@ -1345,7 +1428,7 @@ function renderSync(root) {
     const err = document.getElementById("sync-error");
     const ok = document.getElementById("sync-ok");
     const detail = document.getElementById("sync-detail");
-    const old = result.version !== "write-v3";
+    const old = result.version !== "write-v4";
     const rows = (result.sheets || [])
       .map((row) => `<li>${esc(row.name)}：${esc(String(row.rows))} 列</li>`)
       .join("");
