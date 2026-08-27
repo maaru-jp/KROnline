@@ -26,7 +26,7 @@ const NAV = [
 
 const SUB = {
   dashboard: "Npay 餘額、本月實付、各卡未對帳台幣",
-  "new-purchase": "實付＝產品價格 ＋ 運費 ＋ 刷卡手續費 − 優惠劵折扣。產品價格可改成訂單底部數字",
+  "new-purchase": "扣 Npay：實付＝單價×數量 − 優惠劵折扣 ＋ 運費。直接刷卡才填產品價格與手續費",
   "npay-topup": "選卡並手動填台幣後，會自動寫入試算表",
   purchases: "點一筆訂單，看該筆完整商品明細；取消會補回 Npay 並記刷退",
   "npay-ledger": "儲值、扣除、取消訂單後的退款回補，每筆都留下剩餘點數",
@@ -384,18 +384,26 @@ function renderPurchase(root) {
           <label class="field">配送運費（韓幣）
             <input id="p-shipping" inputmode="decimal" value="${esc(purchaseForm.shipping)}" placeholder="例如 5000" />
           </label>
-          <label class="field">刷卡手續費（韓幣）
+          ${
+            cardMode
+              ? `<label class="field">刷卡手續費（韓幣）
             <input id="p-card-fee" inputmode="decimal" value="${esc(purchaseForm.cardFee)}" placeholder="沒有就填 0" />
           </label>
           <label class="field">產品價格（韓幣）
             <input id="p-goods" inputmode="decimal" value="${esc(purchaseForm.productPriceManual ? purchaseForm.productPrice : String(calcGoods() || ""))}" placeholder="訂單底部的產品價格" />
-          </label>
+          </label>`
+              : ""
+          }
           <label class="field">備註
             <input id="p-note" value="${esc(purchaseForm.note)}" />
           </label>
         </div>
         <datalist id="shops">${shopSuggestions().map((s) => `<option value="${esc(s)}"></option>`).join("")}</datalist>
-        <p class="muted" style="margin:10px 0 0">單價可直接貼 5,390。產品價格預設等於單價×數量；若訂單底部有「產品價格」，請改填那個數字。</p>
+        ${
+          cardMode
+            ? `<p class="muted" style="margin:10px 0 0">單價可直接貼 5,390。產品價格預設等於單價×數量；若訂單底部有「產品價格」，請改填那個數字。</p>`
+            : `<p class="muted" style="margin:10px 0 0">單價可直接貼 5,390。實付依明細單價×數量計算。</p>`
+        }
         <h2 style="margin-top:18px">商品明細</h2>
         <div class="table-wrap">
           <table>
@@ -431,7 +439,7 @@ function renderPurchase(root) {
           </label>
         </div>
         <p class="muted">別家商品直接刷卡：韓幣預設等於實付，台幣請自己填。填完台幣會自動寫入試算表。</p>`
-            : `<p class="muted" style="margin-top:12px">用 Npay 扣掉實付韓幣，不記刷卡。商品填完後會自動寫入試算表。</p>`
+            : `<p class="muted" style="margin-top:12px">用 Npay 扣掉實付韓幣，不記刷卡。實付＝商品合計 − 優惠劵折扣 ＋ 運費。商品填完後會自動寫入試算表。</p>`
         }
         <p class="error" id="p-error">${formError ? esc(formError) : ""}</p>
         <p class="ok-msg" id="p-ok">${formOk ? esc(formOk) : ""}</p>
@@ -468,21 +476,27 @@ function renderPurchase(root) {
     paintPurchaseTotals();
     maybeQueuePurchaseWrite();
   };
-  document.getElementById("p-card-fee").oninput = (e) => {
-    purchaseForm.cardFee = e.target.value;
-    applyPayMethod();
-    syncPayInputs();
-    paintPurchaseTotals();
-    maybeQueuePurchaseWrite();
-  };
-  document.getElementById("p-goods").oninput = (e) => {
-    purchaseForm.productPrice = e.target.value;
-    purchaseForm.productPriceManual = true;
-    applyPayMethod();
-    syncPayInputs();
-    paintPurchaseTotals();
-    maybeQueuePurchaseWrite();
-  };
+  const cardFeeEl = document.getElementById("p-card-fee");
+  if (cardFeeEl) {
+    cardFeeEl.oninput = (e) => {
+      purchaseForm.cardFee = e.target.value;
+      applyPayMethod();
+      syncPayInputs();
+      paintPurchaseTotals();
+      maybeQueuePurchaseWrite();
+    };
+  }
+  const goodsEl = document.getElementById("p-goods");
+  if (goodsEl) {
+    goodsEl.oninput = (e) => {
+      purchaseForm.productPrice = e.target.value;
+      purchaseForm.productPriceManual = true;
+      applyPayMethod();
+      syncPayInputs();
+      paintPurchaseTotals();
+      maybeQueuePurchaseWrite();
+    };
+  }
   document.getElementById("pay-npay").onclick = () => {
     syncItemInputs();
     purchaseForm.payMethod = "npay";
@@ -595,16 +609,17 @@ function paintPurchaseTotals() {
   const productPrice = calcProductPrice();
   const discount = parseKrw(purchaseForm.discount);
   const shipping = parseKrw(purchaseForm.shipping);
-  const cardFee = parseKrw(purchaseForm.cardFee);
+  const cardFee = cardPay() ? parseKrw(purchaseForm.cardFee) : 0;
   const payable = calcPayable();
   const npayAmt = parseKrw(purchaseForm.npay);
   const cardAmt = parseKrw(purchaseForm.cardAmount);
   const remain = npayBalance() - npayAmt;
   const box = document.getElementById("p-totals");
   if (!box) return;
-  const cardMode = purchaseForm.payMethod === "card";
-  const mismatch = itemSum !== productPrice;
-  box.innerHTML = `
+  const cardMode = cardPay();
+  const mismatch = cardMode && itemSum !== productPrice;
+  box.innerHTML = cardMode
+    ? `
     ${mismatch ? `<div><span>明細單價×數量</span><span>${krw(itemSum)}</span></div>` : ""}
     <div><span>產品價格</span><span>${krw(productPrice)}</span></div>
     <div><span>配送運費</span><span>＋ ${krw(shipping)}</span></div>
@@ -617,15 +632,22 @@ function paintPurchaseTotals() {
         ? `<p class="muted" style="margin:0">明細合計與產品價格不同。請把訂單底部的「產品價格」填在左欄；畫面上的單價若已是折後價，加總就不會等於產品價格。</p>`
         : ""
     }
-    ${
-      cardMode
-        ? `<div><span>刷卡 ${esc(purchaseForm.card || "卡")}</span><span>${krw(cardAmt)}${cardAmt === payable ? "" : "（需等於實付）"}</span></div>
-    <div><span>台幣（手動）</span><span>${purchaseForm.cardTwd ? twd(parseKrw(purchaseForm.cardTwd)) : "尚未填"}</span></div>`
-        : `<div><span>Npay 扣除</span><span>${krw(npayAmt)}</span></div>
+    <div><span>刷卡 ${esc(purchaseForm.card || "卡")}</span><span>${krw(cardAmt)}${cardAmt === payable ? "" : "（需等於實付）"}</span></div>
+    <div><span>台幣（手動）</span><span>${purchaseForm.cardTwd ? twd(parseKrw(purchaseForm.cardTwd)) : "尚未填"}</span></div>
+  `
+    : `
+    <div><span>商品合計</span><span>${krw(itemSum)}</span></div>
+    <div><span>優惠劵折扣</span><span>− ${krw(discount)}</span></div>
+    <div><span>配送運費</span><span>${krw(shipping)}</span></div>
+    <div class="pay"><span>實付韓幣</span><span>${krw(payable)}</span></div>
+    <div><span>Npay 扣除</span><span>${krw(npayAmt)}</span></div>
     <div><span>目前 Npay 餘額</span><span>${krw(npayBalance())}</span></div>
-    <div><span>送出後 Npay</span><span class="${remain < 0 ? "debit" : ""}">${remain < 0 ? "餘額不足" : krw(remain)}</span></div>`
-    }
+    <div><span>送出後 Npay</span><span class="${remain < 0 ? "debit" : ""}">${remain < 0 ? "餘額不足" : krw(remain)}</span></div>
   `;
+}
+
+function cardPay() {
+  return purchaseForm.payMethod === "card";
 }
 
 function calcGoods() {
@@ -633,7 +655,7 @@ function calcGoods() {
 }
 
 function calcProductPrice() {
-  if (purchaseForm.productPriceManual) return parseKrw(purchaseForm.productPrice);
+  if (cardPay() && purchaseForm.productPriceManual) return parseKrw(purchaseForm.productPrice);
   return calcGoods();
 }
 
@@ -642,7 +664,7 @@ function calcPayable() {
     calcProductPrice() -
     parseKrw(purchaseForm.discount) +
     parseKrw(purchaseForm.shipping) +
-    parseKrw(purchaseForm.cardFee)
+    (cardPay() ? parseKrw(purchaseForm.cardFee) : 0)
   );
 }
 
@@ -687,7 +709,8 @@ async function savePurchase(opts = {}) {
     purchaseForm.shop = document.getElementById("p-shop").value;
     purchaseForm.discount = document.getElementById("p-discount").value;
     purchaseForm.shipping = document.getElementById("p-shipping").value;
-    purchaseForm.cardFee = document.getElementById("p-card-fee").value;
+    const cardFeeEl = document.getElementById("p-card-fee");
+    if (cardFeeEl) purchaseForm.cardFee = cardFeeEl.value;
     const goodsEl = document.getElementById("p-goods");
     if (goodsEl) {
       purchaseForm.productPrice = goodsEl.value;
@@ -722,16 +745,16 @@ async function savePurchase(opts = {}) {
       return skip("數量必須是正整數");
   }
   const itemSum = items.reduce((sum, row) => sum + row.unitPrice * row.quantity, 0);
-  const productPrice = calcProductPrice() || itemSum;
+  const cardMode = cardPay();
+  const productPrice = cardMode ? calcProductPrice() || itemSum : itemSum;
   const discount = parseKrw(purchaseForm.discount);
   const shipping = parseKrw(purchaseForm.shipping);
-  const cardFee = parseKrw(purchaseForm.cardFee);
+  const cardFee = cardMode ? parseKrw(purchaseForm.cardFee) : 0;
   if (!(productPrice > 0)) return skip("請填產品價格，或至少登一件有單價的商品");
-  if (discount < 0 || discount > productPrice) return skip("優惠劵折扣需介於 0 與產品價格之間");
+  if (discount < 0 || discount > productPrice) return skip("優惠劵折扣需介於 0 與商品合計之間");
   if (shipping < 0) return skip("運費不能是負數");
   if (cardFee < 0) return skip("刷卡手續費不能是負數");
   const payable = productPrice - discount + shipping + cardFee;
-  const cardMode = purchaseForm.payMethod === "card";
   const npayUsed = cardMode ? 0 : payable;
   const cardAmount = cardMode ? parseKrw(purchaseForm.cardAmount || payable) : 0;
   if (npayUsed + cardAmount !== payable)

@@ -221,11 +221,16 @@ function writePurchase_(data) {
 
     var discount = Number(order.storeDiscount || 0);
     var shipping = Number(order.shipping || 0);
-    var cardFee = Number(order.cardFee || 0);
     var npayUsed = Number(order.npayUsed || 0);
     var cardAmount = Number(order.cardAmount || 0);
+    var cardFee = cardAmount > 0 ? Number(order.cardFee || 0) : 0;
     var productPrice = Number(order.productPrice || 0);
-    if (!(productPrice > 0)) productPrice = goods;
+    if (cardAmount > 0) {
+      if (!(productPrice > 0)) productPrice = goods;
+    } else {
+      productPrice = goods;
+      cardFee = 0;
+    }
     var payable = productPrice - discount + shipping + cardFee;
     if (discount < 0 || discount > productPrice) throw new Error("優惠劵折扣不正確");
     if (shipping < 0) throw new Error("運費不能是負數");
