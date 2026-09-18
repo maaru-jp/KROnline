@@ -26,7 +26,7 @@ const NAV = [
 
 const SUB = {
   dashboard: "Npay 餘額、本月實付、各卡未對帳台幣",
-  "new-purchase": "扣 Npay：實付＝單價×數量 − 優惠劵折扣 ＋ 運費。直接刷卡才填產品價格與手續費",
+  "new-purchase": "填完後請按「立即寫入試算表」。扣 Npay：實付＝單價×數量 − 優惠劵折扣 ＋ 運費；直接刷卡才填產品價格與手續費",
   "npay-topup": "選卡並手動填台幣後，會自動寫入試算表",
   purchases: "點一筆訂單，看該筆完整商品明細；取消會補回 Npay 並記刷退",
   "npay-ledger": "儲值、扣除、取消訂單後的退款回補，每筆都留下剩餘點數",
@@ -209,7 +209,6 @@ let lastErrorView = "";
 let lastOkView = "";
 let writeLock = false;
 let topupWriteTimer = 0;
-let purchaseWriteTimer = 0;
 let sheetInfo = null;
 
 function renderNav() {
@@ -438,8 +437,8 @@ function renderPurchase(root) {
             <input type="number" min="0" step="1" id="p-card-twd" value="${esc(purchaseForm.cardTwd)}" placeholder="帳單上的台幣" />
           </label>
         </div>
-        <p class="muted">別家商品直接刷卡：韓幣預設等於實付，台幣請自己填。填完台幣會自動寫入試算表。</p>`
-            : `<p class="muted" style="margin-top:12px">用 Npay 扣掉實付韓幣，不記刷卡。實付＝商品合計 − 優惠劵折扣 ＋ 運費。商品填完後會自動寫入試算表。</p>`
+        <p class="muted">別家商品直接刷卡：韓幣預設等於實付，台幣請自己填。確認無誤後再按「立即寫入試算表」。</p>`
+            : `<p class="muted" style="margin-top:12px">用 Npay 扣掉實付韓幣，不記刷卡。實付＝商品合計 − 優惠劵折扣 ＋ 運費。確認無誤後再按「立即寫入試算表」。</p>`
         }
         <p class="error" id="p-error">${formError ? esc(formError) : ""}</p>
         <p class="ok-msg" id="p-ok">${formOk ? esc(formOk) : ""}</p>
@@ -467,14 +466,12 @@ function renderPurchase(root) {
     applyPayMethod();
     syncPayInputs();
     paintPurchaseTotals();
-    maybeQueuePurchaseWrite();
   };
   document.getElementById("p-shipping").oninput = (e) => {
     purchaseForm.shipping = e.target.value;
     applyPayMethod();
     syncPayInputs();
     paintPurchaseTotals();
-    maybeQueuePurchaseWrite();
   };
   const cardFeeEl = document.getElementById("p-card-fee");
   if (cardFeeEl) {
@@ -483,7 +480,6 @@ function renderPurchase(root) {
       applyPayMethod();
       syncPayInputs();
       paintPurchaseTotals();
-      maybeQueuePurchaseWrite();
     };
   }
   const goodsEl = document.getElementById("p-goods");
@@ -494,7 +490,6 @@ function renderPurchase(root) {
       applyPayMethod();
       syncPayInputs();
       paintPurchaseTotals();
-      maybeQueuePurchaseWrite();
     };
   }
   document.getElementById("pay-npay").onclick = () => {
@@ -522,21 +517,12 @@ function renderPurchase(root) {
     cardTwdEl.oninput = (e) => {
       purchaseForm.cardTwd = e.target.value;
       paintPurchaseTotals();
-      maybeQueuePurchaseWrite();
-    };
-    cardTwdEl.onblur = () => maybeQueuePurchaseWrite();
-    cardTwdEl.onkeydown = (e) => {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        savePurchase();
-      }
     };
   }
   const cardEl = document.getElementById("p-card");
   if (cardEl) {
     cardEl.onchange = (e) => {
       purchaseForm.card = e.target.value;
-      maybeQueuePurchaseWrite();
     };
   }
   document.getElementById("add-item").onclick = () => {
@@ -579,7 +565,6 @@ function paintItemRows() {
       syncProductPriceField();
       syncPayInputs();
       paintPurchaseTotals();
-      maybeQueuePurchaseWrite();
     };
   });
   tbody.querySelectorAll("[data-del]").forEach((el) => {
@@ -592,7 +577,6 @@ function paintItemRows() {
       syncProductPriceField();
       syncPayInputs();
       paintPurchaseTotals();
-      maybeQueuePurchaseWrite();
     };
   });
 }
@@ -819,16 +803,6 @@ function fail(message) {
   formError = message;
   formOk = "";
   render();
-}
-
-function maybeQueuePurchaseWrite() {
-  if (purchaseForm.payMethod === "card") {
-    if (!(parseKrw(purchaseForm.cardAmount) > 0) || !(parseKrw(purchaseForm.cardTwd) > 0)) return;
-  } else if (!(parseKrw(purchaseForm.npay) > 0)) {
-    return;
-  }
-  clearTimeout(purchaseWriteTimer);
-  purchaseWriteTimer = setTimeout(() => savePurchase({ auto: true }), 900);
 }
 
 function maybeQueueTopupWrite() {
