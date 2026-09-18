@@ -405,7 +405,7 @@ function reconcile_(data) {
       }
     }
     if (!found) throw new Error("找不到 " + id);
-    var next = data.reconciled ? "已對帳" : "未對帳";
+    var next = data.reconciled === true || data.reconciled === "true" ? "已對帳" : "未對帳";
     var reconCol = headerCol_(sh, "對帳") || 7;
     sh.getRange(found, reconCol).setValue(next);
     return json_({ ok: true, action: "reconcile", id: id, reconciled: !!data.reconciled });
