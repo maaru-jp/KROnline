@@ -150,6 +150,10 @@ const SheetsSync = {
     return this.send({ action: "cancel", orderId: orderId });
   },
 
+  async reconcile(id, reconciled) {
+    return this.send({ action: "reconcile", id, reconciled: !!reconciled });
+  },
+
   async send(payload) {
     const hint = this.urlHint();
     if (hint) return { ok: false, error: hint };

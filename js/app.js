@@ -30,7 +30,7 @@ const SUB = {
   "npay-topup": "選卡並手動填台幣後，會自動寫入試算表",
   purchases: "點一筆訂單，看該筆完整商品明細；取消會補回 Npay 並記刷退",
   "npay-ledger": "儲值、扣除、取消訂單後的退款回補，每筆都留下剩餘點數",
-  cards: "原刷卡與刷退都記韓幣與手動填的台幣，對到銀行帳單再勾已對帳",
+  cards: "選卡、對月份；有刷退時，原刷卡對扣款、刷退對退款，兩筆都要勾",
   sheets: "試算表目前的資料",
   sync: "試算表是唯一帳本；這裡只記住連線網址",
   "order-detail": "這一筆的全部商品、折扣、運費、Npay 與刷卡；取消會補回點數並記刷退",
@@ -147,6 +147,12 @@ function bindOrderLinks(root) {
 let ledger = emptyLedger();
 let view = "dashboard";
 let cardTab = "富邦";
+let cardsUi = {
+  month: "",
+  selected: new Set(),
+  busy: false,
+  showDone: false,
+};
 let sheetTab = "商品明細";
 let selectedOrderId = "";
 let detailFrom = "purchases";
@@ -1154,13 +1160,227 @@ function renderNpay(root) {
   bindOrderLinks(root);
 }
 
+function cardMonths(card) {
+  return [
+    ...new Set(
+      ledger.cards
+        .filter((row) => row.card === card)
+        .map((row) => monthKey(row.date))
+        .filter(Boolean),
+    ),
+  ].sort().reverse();
+}
+
+function cardMate(row) {
+  if (!row?.relatedId || !isOrderId(row.relatedId)) return null;
+  const refund = isCardRefund(row.type);
+  return (
+    ledger.cards.find(
+      (other) =>
+        other.id !== row.id &&
+        other.card === row.card &&
+        other.relatedId === row.relatedId &&
+        isCardRefund(other.type) !== refund,
+    ) || null
+  );
+}
+
+function cardTypeLabel(row) {
+  if (isCardRefund(row.type)) return "刷退（帳單退款）";
+  return row.type;
+}
+
+function refundHint(row) {
+  const mate = cardMate(row);
+  if (isCardRefund(row.type)) {
+    if (!mate) return "請在銀行帳單找「退款／貸方」，台幣金額應與此筆相同。";
+    if (mate.reconciled) {
+      return `原刷卡 ${mate.date} ${twd(mate.amountTwd)} 已對過扣款；現在只要對帳單上的退款。`;
+    }
+    if (cardsUi.month && monthKey(mate.date) !== cardsUi.month) {
+      return `原刷卡在 ${monthKey(mate.date)}（${twd(mate.amountTwd)}）。刷退常晚一個月才入帳，這個月只對退款。`;
+    }
+    return `原刷卡 ${mate.date} ${twd(mate.amountTwd)} 對帳單「扣款」；這一筆對「退款」。兩筆都要勾，不要加減成一筆。`;
+  }
+  if (mate && isCardRefund(mate.type)) {
+    if (mate.reconciled) return "此筆後來有刷退，且退款已對帳。";
+    if (cardsUi.month && monthKey(mate.date) !== cardsUi.month) {
+      return `刷退在 ${monthKey(mate.date)} 才入帳。這個月先對原刷卡的扣款。`;
+    }
+    return `此筆後來有刷退 ${twd(mate.amountTwd)}。帳單會有扣款和退款兩行，分開對。`;
+  }
+  return "";
+}
+
+function groupOpenCardRows(rows) {
+  const used = new Set();
+  const groups = [];
+  const sorted = rows.slice().sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  for (const row of sorted) {
+    if (used.has(row.id)) continue;
+    const mate = cardMate(row);
+    const mateHere = mate && rows.some((item) => item.id === mate.id);
+    if (mateHere) {
+      used.add(row.id);
+      used.add(mate.id);
+      const charge = isCardRefund(row.type) ? mate : row;
+      const refund = isCardRefund(row.type) ? row : mate;
+      groups.push({ kind: "pair", rows: [charge, refund], relatedId: row.relatedId });
+    } else {
+      used.add(row.id);
+      groups.push({ kind: isCardRefund(row.type) ? "refund" : "charge", rows: [row] });
+    }
+  }
+  return groups;
+}
+
+function cardRowVisible(row) {
+  if (row.card !== cardTab) return false;
+  if (cardsUi.month && monthKey(row.date) !== cardsUi.month) return false;
+  return true;
+}
+
+async function markCardsReconciled(ids, reconciled) {
+  const list = [...new Set(ids)].filter(Boolean);
+  if (!list.length || cardsUi.busy) return;
+  cardsUi.busy = true;
+  notice = reconciled
+    ? `正在標記 ${list.length} 筆已對帳…`
+    : `正在還原 ${list.length} 筆為未對帳…`;
+  render();
+  let failed = "";
+  let done = 0;
+  for (const id of list) {
+    const result = await SheetsSync.reconcile(id, reconciled);
+    if (!result.ok && !result.opaque) {
+      failed = result.error || "對帳寫入失敗";
+      break;
+    }
+    done += 1;
+    if (list.length > 1) {
+      notice = `正在寫入 ${done}／${list.length}…`;
+      const banner = document.getElementById("banner");
+      if (banner) banner.innerHTML = `<div class="banner">${esc(notice)}</div>`;
+    }
+  }
+  const loaded = await refreshFromSheets();
+  cardsUi.busy = false;
+  list.forEach((id) => cardsUi.selected.delete(id));
+  if (failed) {
+    notice = `${failed}${done ? `（已寫入 ${done} 筆）` : ""}`;
+  } else if (!loaded.ok) {
+    notice = loaded.error || "已送出，但無法從試算表讀回";
+  } else {
+    const remain = ledger.cards.filter((row) => row.card === cardTab && !row.reconciled);
+    const remainTwd = remain.reduce((sum, row) => sum + Number(row.amountTwd || 0), 0);
+    notice = reconciled
+      ? `已標記 ${done} 筆為已對帳。${cardTab} 還有 ${remain.length} 筆未對帳${remain.length ? `，${twd(remainTwd)}` : ""}。`
+      : `已還原 ${done} 筆為未對帳。`;
+  }
+  render();
+}
+
 function renderCards(root) {
-  const rows = ledger.cards.filter((row) => row.card === cardTab);
-  const openRows = rows.filter((row) => !row.reconciled);
+  const allRows = ledger.cards.filter((row) => row.card === cardTab);
+  const months = cardMonths(cardTab);
+  if (cardsUi.month && !months.includes(cardsUi.month)) cardsUi.month = "";
+  const visible = allRows.filter(cardRowVisible);
+  const openRows = visible.filter((row) => !row.reconciled);
+  const doneRows = visible.filter((row) => row.reconciled);
   const openKrw = openRows.reduce((sum, row) => sum + row.amount, 0);
   const openTwd = openRows.reduce((sum, row) => sum + Number(row.amountTwd || 0), 0);
-  const allKrw = rows.reduce((sum, row) => sum + row.amount, 0);
-  const allTwd = rows.reduce((sum, row) => sum + Number(row.amountTwd || 0), 0);
+  const picked = openRows.filter((row) => cardsUi.selected.has(row.id));
+  const pickedTwd = picked.reduce((sum, row) => sum + Number(row.amountTwd || 0), 0);
+  const openCharges = openRows.filter((row) => !isCardRefund(row.type));
+  const openRefunds = openRows.filter((row) => isCardRefund(row.type));
+  const openChargeTwd = openCharges.reduce((sum, row) => sum + Number(row.amountTwd || 0), 0);
+  const openRefundTwd = openRefunds.reduce((sum, row) => sum + Number(row.amountTwd || 0), 0);
+  const pickedRefunds = picked.filter((row) => isCardRefund(row.type)).length;
+  const allChecked = openRows.length > 0 && picked.length === openRows.length;
+  const busy = cardsUi.busy;
+  const openGroups = groupOpenCardRows(openRows);
+
+  const rowHtml = (row, open) => `<tr class="${isCardRefund(row.type) ? "recon-refund" : ""}">
+            <td>${
+              open
+                ? `<label class="check"><input type="checkbox" data-pick="${esc(row.id)}" ${
+                    cardsUi.selected.has(row.id) ? "checked" : ""
+                  } ${busy ? "disabled" : ""} /></label>`
+                : ""
+            }</td>
+            <td>${esc(row.date)}</td>
+            <td>${esc(cardTypeLabel(row))}</td>
+            <td class="num ${row.amount < 0 ? "credit" : ""}">${krw(row.amount)}</td>
+            <td class="num ${Number(row.amountTwd) < 0 ? "credit" : ""}">${row.amountTwd ? twd(row.amountTwd) : "—"}</td>
+            <td>${isOrderId(row.relatedId) ? orderLink(row.relatedId) : esc(row.relatedId || "—")}</td>
+            <td>${
+              open
+                ? `<button class="btn btn-primary" data-one="${esc(row.id)}" type="button" ${busy ? "disabled" : ""}>對到了</button>`
+                : `<button class="btn" data-undo="${esc(row.id)}" type="button" ${busy ? "disabled" : ""}>還原未對帳</button>`
+            }</td>
+          </tr>`;
+
+  const tableWrap = (rows, open) => `<div class="table-wrap"><table>
+          <thead><tr><th></th><th>日期</th><th>類型</th><th class="num">韓幣</th><th class="num">台幣</th><th>關聯</th><th></th></tr></thead>
+          <tbody>${rows.map((row) => rowHtml(row, open)).join("")}</tbody>
+        </table></div>`;
+
+  const openListHtml = (() => {
+    const chunks = [];
+    let chargeBuf = [];
+    const flushCharges = () => {
+      if (!chargeBuf.length) return;
+      chunks.push(tableWrap(chargeBuf, true));
+      chargeBuf = [];
+    };
+    for (const group of openGroups) {
+      if (group.kind === "pair") {
+        flushCharges();
+        const net = group.rows.reduce((sum, row) => sum + Number(row.amountTwd || 0), 0);
+        const ids = group.rows.map((row) => row.id);
+        chunks.push(`<div class="recon-group">
+          <div class="recon-group-head">
+            <div>
+              <strong>同一筆訂單 ${group.relatedId ? orderLink(group.relatedId) : ""}</strong>
+              <p class="muted">帳單上會有「扣款」和「退款」兩行。兩筆都入帳了再一起勾；退款還沒出現就先只對原刷卡。</p>
+            </div>
+            <div>淨額 ${twd(net)}</div>
+            <button class="btn btn-primary" type="button" data-pair="${esc(ids.join(","))}" ${busy ? "disabled" : ""}>兩筆都對到了</button>
+          </div>
+          ${tableWrap(group.rows, true)}
+        </div>`);
+        continue;
+      }
+      if (group.kind === "refund") {
+        flushCharges();
+        const row = group.rows[0];
+        chunks.push(`<div class="recon-group is-refund">
+          <div class="recon-group-head">
+            <div>
+              <strong>刷退</strong>
+              <p class="muted">${esc(refundHint(row))}</p>
+            </div>
+          </div>
+          ${tableWrap(group.rows, true)}
+        </div>`);
+        continue;
+      }
+      const row = group.rows[0];
+      const hint = refundHint(row);
+      if (hint) {
+        flushCharges();
+        chunks.push(`<div class="recon-group">
+          <p class="muted" style="margin:0 0 8px">${esc(hint)}</p>
+          ${tableWrap(group.rows, true)}
+        </div>`);
+      } else {
+        chargeBuf.push(row);
+      }
+    }
+    flushCharges();
+    return chunks.join("");
+  })();
+
   root.innerHTML = `
     <div class="tabs">
       ${CARDS.map(
@@ -1168,60 +1388,129 @@ function renderCards(root) {
           `<button class="btn ${name === cardTab ? "btn-primary" : ""}" data-card="${esc(name)}" type="button">${esc(name)}</button>`,
       ).join("")}
     </div>
+    <ol class="steps recon-guide">
+      <li>打開 ${esc(cardTab)} 銀行 App／帳單，選同一個月份。</li>
+      <li>一般刷卡、Npay 儲值：對帳單上的「扣款」。</li>
+      <li>若有<strong>刷退</strong>：帳單會多一筆「退款／貸方」。原刷卡對扣款，刷退對退款，兩筆都要勾。</li>
+      <li>不要把刷卡和刷退加減成一個數字再去對。沒出現在帳單的先不要勾。</li>
+    </ol>
     <div class="stats">
-      <article class="stat"><div class="label">${esc(cardTab)} 合計韓幣</div><div class="value">${krw(allKrw)}</div></article>
-      <article class="stat"><div class="label">${esc(cardTab)} 合計台幣</div><div class="value">${twd(allTwd)}</div></article>
-      <article class="stat"><div class="label">未對帳台幣</div><div class="value">${twd(openTwd)}</div><div class="sub">${krw(openKrw)}</div></article>
-      <article class="stat"><div class="label">未對帳筆數</div><div class="value">${openRows.length}</div></article>
+      <article class="stat accent"><div class="label">未對帳淨額</div><div class="value">${twd(openTwd)}</div><div class="sub">${krw(openKrw)}</div></article>
+      <article class="stat"><div class="label">未對帳扣款</div><div class="value">${twd(openChargeTwd)}</div><div class="sub">${openCharges.length} 筆</div></article>
+      <article class="stat"><div class="label">未對帳刷退</div><div class="value">${twd(openRefundTwd)}</div><div class="sub">${openRefunds.length} 筆，對帳單退款</div></article>
+      <article class="stat"><div class="label">已勾選淨額</div><div class="value">${twd(pickedTwd)}</div><div class="sub">${picked.length} 筆${pickedRefunds ? `，含 ${pickedRefunds} 筆刷退` : ""}</div></article>
     </div>
     <section class="panel">
+      <div class="recon-toolbar">
+        <label>帳單月份
+          <select id="card-month" ${busy ? "disabled" : ""}>
+            <option value="" ${cardsUi.month ? "" : "selected"}>全部月份</option>
+            ${months
+              .map(
+                (month) =>
+                  `<option value="${esc(month)}" ${cardsUi.month === month ? "selected" : ""}>${esc(month)}</option>`,
+              )
+              .join("")}
+          </select>
+        </label>
+        <label class="check">
+          <input type="checkbox" id="card-show-done" ${cardsUi.showDone ? "checked" : ""} ${busy ? "disabled" : ""} />
+          顯示已對帳
+        </label>
+      </div>
       ${
-        rows.length
-          ? `<div class="table-wrap"><table>
-        <thead><tr><th>單號</th><th>日期</th><th>類型</th><th class="num">韓幣</th><th class="num">匯率</th><th class="num">台幣</th><th>關聯</th><th>對帳</th></tr></thead>
-        <tbody>
-          ${rows
+        !allRows.length
+          ? `<p class="empty">${esc(cardTab)} 尚無刷卡／刷退紀錄。儲值或直接刷卡寫入後會出現在這裡。</p>`
+          : openRows.length
+          ? `<div class="recon-action">
+          <label class="check">
+            <input type="checkbox" id="card-pick-all" ${allChecked ? "checked" : ""} ${busy ? "disabled" : ""} />
+            全選未對帳
+          </label>
+          <div>已勾 <strong>${picked.length}</strong> 筆${pickedRefunds ? `（含 ${pickedRefunds} 筆刷退）` : ""}，淨額 <strong>${twd(pickedTwd)}</strong></div>
+          <button class="btn btn-primary" type="button" id="card-mark" ${busy || !picked.length ? "disabled" : ""}>標記已對帳</button>
+        </div>
+        ${
+          openRefunds.length
+            ? `<p class="recon-refund-note">這個範圍有 ${openRefunds.length} 筆刷退。請在帳單找金額相同的退款；原刷卡若也還沒對，會跟刷退放在同一組。</p>`
+            : ""
+        }
+        ${openListHtml}`
+          : `<p class="empty">${esc(cardTab)}${cardsUi.month ? ` ${esc(cardsUi.month)}` : ""} 沒有未對帳的卡帳。對完帳單就可以看下一個月份。</p>`
+      }
+      ${
+        cardsUi.showDone
+          ? `<div class="recon-done">
+        <h2>已對帳</h2>
+        ${
+          doneRows.length
+            ? `<div class="table-wrap"><table>
+          <thead><tr><th></th><th>日期</th><th>類型</th><th class="num">韓幣</th><th class="num">台幣</th><th>關聯</th><th></th></tr></thead>
+          <tbody>${doneRows
             .slice()
             .reverse()
-            .map(
-              (row) => `<tr>
-            <td>${esc(row.id)}</td>
-            <td>${esc(row.date)}</td>
-            <td>${esc(row.type)}</td>
-            <td class="num ${row.amount < 0 ? "credit" : ""}">${krw(row.amount)}</td>
-            <td class="num">${fxText(row.fxRate)}</td>
-            <td class="num ${row.amountTwd < 0 ? "credit" : ""}">${row.amountTwd ? twd(row.amountTwd) : "—"}</td>
-            <td>${isOrderId(row.relatedId) ? orderLink(row.relatedId) : esc(row.relatedId || "—")}</td>
-            <td><button class="btn ${row.reconciled ? "" : "btn-primary"}" data-toggle="${esc(row.id)}" type="button">${row.reconciled ? "已對帳" : "未對帳"}</button></td>
-          </tr>`,
-            )
-            .join("")}
-        </tbody>
-      </table></div>`
-          : `<p class="empty">${esc(cardTab)} 尚無刷卡／刷退紀錄</p>`
+            .map((row) => rowHtml(row, false))
+            .join("")}</tbody>
+        </table></div>`
+            : `<p class="empty">這個範圍還沒有已對帳紀錄。</p>`
+        }
+      </div>`
+          : ""
       }
     </section>
   `;
   bindOrderLinks(root);
   root.querySelectorAll("[data-card]").forEach((btn) => {
     btn.onclick = () => {
+      if (busy) return;
       cardTab = btn.dataset.card;
+      cardsUi.selected = new Set();
+      cardsUi.month = "";
       render();
     };
   });
-  root.querySelectorAll("[data-toggle]").forEach((btn) => {
-    btn.onclick = async () => {
-      const row = ledger.cards.find((itemRow) => itemRow.id === btn.dataset.toggle);
-      if (!row) return;
-      const result = await SheetsSync.reconcile(row.id, !row.reconciled);
-      if (!result.ok && !result.opaque) {
-        notice = result.error || "對帳狀態寫入失敗";
-        render();
-        return;
-      }
-      await refreshFromSheets();
+  const monthEl = document.getElementById("card-month");
+  if (monthEl) {
+    monthEl.onchange = (e) => {
+      cardsUi.month = e.target.value;
+      cardsUi.selected = new Set();
       render();
     };
+  }
+  const showDoneEl = document.getElementById("card-show-done");
+  if (showDoneEl) {
+    showDoneEl.onchange = (e) => {
+      cardsUi.showDone = e.target.checked;
+      render();
+    };
+  }
+  const pickAll = document.getElementById("card-pick-all");
+  if (pickAll) {
+    pickAll.onchange = (e) => {
+      if (e.target.checked) openRows.forEach((row) => cardsUi.selected.add(row.id));
+      else openRows.forEach((row) => cardsUi.selected.delete(row.id));
+      render();
+    };
+  }
+  root.querySelectorAll("[data-pick]").forEach((el) => {
+    el.onchange = (e) => {
+      if (e.target.checked) cardsUi.selected.add(el.dataset.pick);
+      else cardsUi.selected.delete(el.dataset.pick);
+      render();
+    };
+  });
+  const markBtn = document.getElementById("card-mark");
+  if (markBtn) {
+    markBtn.onclick = () => markCardsReconciled([...cardsUi.selected], true);
+  }
+  root.querySelectorAll("[data-one]").forEach((btn) => {
+    btn.onclick = () => markCardsReconciled([btn.dataset.one], true);
+  });
+  root.querySelectorAll("[data-pair]").forEach((btn) => {
+    btn.onclick = () => markCardsReconciled(btn.dataset.pair.split(",").filter(Boolean), true);
+  });
+  root.querySelectorAll("[data-undo]").forEach((btn) => {
+    btn.onclick = () => markCardsReconciled([btn.dataset.undo], false);
   });
 }
 
