@@ -154,8 +154,107 @@ textarea {
   font-size: 13px;
 }
 
-.btn:hover {
-  border-color: #c4b9aa;
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.recon-guide {
+  margin: 0 0 16px;
+}
+
+.recon-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  align-items: center;
+  margin: 0 0 14px;
+}
+
+.recon-toolbar label {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.recon-toolbar select {
+  min-width: 140px;
+}
+
+.recon-action {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.recon-action strong {
+  color: var(--ink);
+}
+
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.check input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--ink);
+}
+
+.recon-done {
+  margin-top: 22px;
+}
+
+.recon-refund-note {
+  background: var(--green-soft);
+  color: #21543c;
+  padding: 12px 14px;
+  border-radius: 10px;
+  font-size: 13px;
+  margin: 0 0 12px;
+}
+
+.recon-group {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px;
+  margin-bottom: 12px;
+  background: var(--card);
+}
+
+.recon-group.is-refund {
+  border-color: #b7d2c4;
+  background: #f4faf6;
+}
+
+.recon-group-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.recon-group-head p {
+  margin: 4px 0 0;
+}
+
+tr.recon-refund td {
+  color: var(--green);
 }
 
 .btn-primary {
@@ -454,6 +553,11 @@ tr.row-click {
   .grid-2,
   .form-grid {
     grid-template-columns: 1fr;
+  }
+
+  .recon-action {
+    flex-direction: column;
+    align-items: flex-start;
   }
 
   .topbar h1 {
